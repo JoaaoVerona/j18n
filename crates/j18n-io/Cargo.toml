@@ -1,0 +1,13 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "j18n-io"
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+j18n-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

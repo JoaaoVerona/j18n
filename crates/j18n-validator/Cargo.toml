@@ -1,0 +1,13 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "j18n-validator"
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+j18n-core.workspace = true
+j18n-io.workspace = true
+regex.workspace = true
+tracing.workspace = true

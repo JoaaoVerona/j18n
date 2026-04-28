@@ -1,0 +1,107 @@
+{
+	"$schema": "https://runfile.io/schemas/v0",
+	"globals": {
+		"logging": true
+	},
+	"includes": ["Runfile-wsl.json"],
+	"targets": {
+		"build": {
+			"description": "Build all crates in debug mode",
+			"commands": ["cargo build $(ARGS)"],
+			"after": [{ "target": "install" }],
+			"modifiers": {
+				"os:linux": {
+					"env": {
+						"CARGO_TARGET_DIR": "target-linux"
+					}
+				},
+				"os:windows": {
+					"prepend": {
+						"after": [{ "target": "wsl:build" }]
+					},
+					"env": {
+						"CARGO_TARGET_DIR": "target-windows"
+					}
+				}
+			}
+		},
+		"build:release": {
+			"description": "Build all crates in release mode",
+			"commands": ["cargo build --release $(ARGS)"],
+			"modifiers": {
+				"os:linux": {
+					"env": {
+						"CARGO_TARGET_DIR": "target-linux"
+					}
+				},
+				"os:windows": {
+					"append": {
+						"after": [{ "target": "wsl:build:release" }]
+					},
+					"env": {
+						"CARGO_TARGET_DIR": "target-windows"
+					}
+				}
+			}
+		},
+		"clean": {
+			"description": "Remove build artifacts",
+			"commands": [
+				"cargo clean --target-dir target",
+				"cargo clean --target-dir target-linux",
+				"cargo clean --target-dir target-windows"
+			]
+		},
+		"install": {
+			"description": "Copies the built binary to .local/bin",
+			"commands": ["cp target-linux/debug/j18n ~/.local/bin/j18n"],
+			"detach": true,
+			"forceShell": "sh",
+			"modifiers": {
+				"os:windows": {
+					"replace": {
+						"commands": ["cp target-windows/debug/j18n.exe ~/.local/bin/j18n.exe"]
+					}
+				}
+			}
+		},
+		"lint": {
+			"description": "Completely lints (type-checks, formats, runs Clippy) the project",
+			"commands": ["cargo check", "cargo fmt --all", "cargo clippy --all-targets --all-features -- -D warnings"],
+			"modifiers": {
+				"os:linux": {
+					"env": {
+						"CARGO_TARGET_DIR": "target-linux"
+					}
+				},
+				"os:windows": {
+					"append": {
+						"after": [{ "target": "wsl:lint" }]
+					},
+					"env": {
+						"CARGO_TARGET_DIR": "target-windows"
+					}
+				}
+			}
+		},
+		"test": {
+			"description": "Run all workspace tests",
+			"commands": ["cargo test $(ARGS)"],
+			"modifiers": {
+				"os:linux": {
+					"env": {
+						"CARGO_TARGET_DIR": "target-linux"
+					}
+				},
+				"os:windows": {
+					"append": {
+						"after": [{ "target": "wsl:test" }]
+					},
+					"env": {
+						"CARGO_TARGET_DIR": "target-windows"
+					}
+				}
+			}
+		}
+	}
+}

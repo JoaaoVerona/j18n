@@ -1,0 +1,12 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "j18n-core"
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

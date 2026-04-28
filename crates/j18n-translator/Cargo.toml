@@ -1,0 +1,12 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "j18n-translator"
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+j18n-core.workspace = true
+regex.workspace = true
