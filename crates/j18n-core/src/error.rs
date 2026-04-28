@@ -22,8 +22,11 @@ pub enum J18nError {
 		source: serde_json::Error,
 	},
 
-	#[error("language with ISO-639 code \"{code}\" not found")]
-	LanguageNotFound { code: String },
+	#[error("invalid path pattern \"{pattern}\": {reason}")]
+	InvalidPattern { pattern: String, reason: String },
+
+	#[error("invalid regex pattern \"{pattern}\": {reason}")]
+	InvalidRegex { pattern: String, reason: String },
 
 	#[error("missing translation for \"{key}\" in generated JSON")]
 	MissingTranslation { key: String },

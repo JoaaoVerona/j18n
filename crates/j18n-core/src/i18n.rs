@@ -1,22 +1,11 @@
-use crate::language::Language;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct I18nDefinition {
-	pub json_file_path: PathBuf,
-	pub language: Language,
-}
-
-impl I18nDefinition {
-	pub fn from_base_dir(base_dir: impl AsRef<Path>, language: Language) -> Self {
-		let json_file_path = base_dir.as_ref().join(format!("{}.json", language.iso_639_code()));
-
-		Self {
-			json_file_path,
-			language,
-		}
-	}
+	pub file: PathBuf,
+	pub language: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -40,22 +29,6 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn from_base_dir_joins_iso_code_with_json_extension() {
-		let definition = I18nDefinition::from_base_dir("locales", Language::ENGLISH);
-
-		assert_eq!(definition.json_file_path, PathBuf::from("locales").join("en.json"));
-		assert_eq!(definition.language, Language::ENGLISH);
-	}
-
-	#[test]
-	fn from_base_dir_handles_iso_codes_with_dash() {
-		let zh_cn = Language::from_iso_639_code("zh-CN").unwrap();
-		let definition = I18nDefinition::from_base_dir("locales", zh_cn);
-
-		assert_eq!(definition.json_file_path, PathBuf::from("locales").join("zh-CN.json"));
-	}
-
-	#[test]
 	fn empty_i18n_data_has_no_entries() {
 		let data = I18nData::empty();
 
@@ -73,5 +46,27 @@ mod tests {
 		let keys: Vec<&str> = data.walked_tree_keys().collect();
 
 		assert_eq!(keys, vec!["a", "b.c"]);
+	}
+
+	#[test]
+	fn i18n_definition_deserializes_from_json() {
+		let json = r#"{ "file": "locales/en.json", "language": "English" }"#;
+		let definition: I18nDefinition = serde_json::from_str(json).unwrap();
+
+		assert_eq!(definition.file, PathBuf::from("locales/en.json"));
+		assert_eq!(definition.language, "English");
+	}
+
+	#[test]
+	fn i18n_definition_serializes_to_json_with_expected_keys() {
+		let definition = I18nDefinition {
+			file: PathBuf::from("locales/pt.json"),
+			language: "Brazilian Portuguese".to_string(),
+		};
+		let serialized = serde_json::to_string(&definition).unwrap();
+
+		assert!(serialized.contains("\"file\""));
+		assert!(serialized.contains("\"language\""));
+		assert!(serialized.contains("Brazilian Portuguese"));
 	}
 }

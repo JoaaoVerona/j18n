@@ -1,17 +1,34 @@
 use anyhow::{Context, Result};
+use j18n_core::{I18nDefinition, PathPattern};
+use j18n_translator::compile_interpolation_patterns;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct I18nToolConfig {
-	#[serde(rename = "baseDirectory")]
-	pub base_directory: PathBuf,
+	#[serde(rename = "additionalPrompts")]
+	pub additional_prompts: Vec<String>,
+
+	#[serde(rename = "batchSize")]
+	pub batch_size: usize,
+
+	#[serde(rename = "excludePatterns")]
+	pub exclude_patterns: Vec<String>,
 
 	#[serde(rename = "generateI18nFor")]
-	pub generate_i18n_for: Vec<String>,
+	pub generate_i18n_for: Vec<I18nDefinition>,
+
+	#[serde(rename = "hashCacheLocation", default)]
+	pub hash_cache_location: Option<PathBuf>,
+
+	#[serde(rename = "interpolationPatterns")]
+	pub interpolation_patterns: Vec<String>,
+
+	#[serde(rename = "parallelBatches")]
+	pub parallel_batches: usize,
 
 	#[serde(rename = "referenceI18n")]
-	pub reference_i18n: String,
+	pub reference_i18n: I18nDefinition,
 
 	pub translator: TranslatorKind,
 }
@@ -21,6 +38,33 @@ pub struct I18nToolConfig {
 pub enum TranslatorKind {
 	ClaudeCode,
 	GeminiApi,
+}
+
+impl I18nToolConfig {
+	pub fn compile_patterns(&self) -> Result<(Vec<PathPattern>, Vec<regex::Regex>)> {
+		let exclude_patterns = self
+			.exclude_patterns
+			.iter()
+			.map(|raw| PathPattern::parse(raw))
+			.collect::<Result<Vec<_>, _>>()
+			.context("invalid excludePatterns")?;
+		let interpolation_patterns =
+			compile_interpolation_patterns(&self.interpolation_patterns).context("invalid interpolationPatterns")?;
+
+		Ok((exclude_patterns, interpolation_patterns))
+	}
+
+	pub fn validate_numbers(&self) -> Result<()> {
+		if self.batch_size == 0 {
+			anyhow::bail!("batchSize must be at least 1");
+		}
+
+		if self.parallel_batches == 0 {
+			anyhow::bail!("parallelBatches must be at least 1");
+		}
+
+		Ok(())
+	}
 }
 
 pub fn load_config(path: &Path) -> Result<I18nToolConfig> {
@@ -43,26 +87,167 @@ mod tests {
 		path
 	}
 
+	fn full_config_json() -> &'static str {
+		r#"{
+			"additionalPrompts": ["context line"],
+			"batchSize": 50,
+			"excludePatterns": ["sample.**"],
+			"generateI18nFor": [
+				{ "file": "locales/pt.json", "language": "Brazilian Portuguese" },
+				{ "file": "locales/es.json", "language": "Spanish" }
+			],
+			"interpolationPatterns": ["\\{\\{(.+?)\\}\\}"],
+			"parallelBatches": 3,
+			"referenceI18n": { "file": "locales/en.json", "language": "English" },
+			"translator": "claude-code"
+		}"#
+	}
+
 	#[test]
-	fn parses_minimal_valid_config() {
+	fn parses_full_valid_config() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(&dir, "a.json", full_config_json());
+
+		let config = load_config(&path).unwrap();
+
+		assert_eq!(config.batch_size, 50);
+		assert_eq!(config.parallel_batches, 3);
+		assert_eq!(config.exclude_patterns, vec!["sample.**".to_string()]);
+		assert_eq!(config.interpolation_patterns, vec!["\\{\\{(.+?)\\}\\}".to_string()]);
+		assert_eq!(config.reference_i18n.file, PathBuf::from("locales/en.json"));
+		assert_eq!(config.reference_i18n.language, "English");
+		assert_eq!(config.generate_i18n_for.len(), 2);
+		assert_eq!(config.generate_i18n_for[0].file, PathBuf::from("locales/pt.json"));
+		assert_eq!(config.generate_i18n_for[0].language, "Brazilian Portuguese");
+		assert!(matches!(config.translator, TranslatorKind::ClaudeCode));
+		assert!(config.hash_cache_location.is_none());
+	}
+
+	#[test]
+	fn parses_optional_hash_cache_location_when_present() {
 		let dir = TempDir::new().unwrap();
 		let path = write_config(
 			&dir,
 			"a.json",
 			r#"{
-				"baseDirectory": "./locales",
-				"referenceI18n": "en",
-				"generateI18nFor": ["pt", "es"],
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [{ "file": "pt.json", "language": "Portuguese" }],
+				"hashCacheLocation": "custom/.cache.json",
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
 		);
 
 		let config = load_config(&path).unwrap();
 
-		assert_eq!(config.base_directory, PathBuf::from("./locales"));
-		assert_eq!(config.reference_i18n, "en");
-		assert_eq!(config.generate_i18n_for, vec!["pt".to_string(), "es".to_string()]);
-		assert!(matches!(config.translator, TranslatorKind::ClaudeCode));
+		assert_eq!(config.hash_cache_location, Some(PathBuf::from("custom/.cache.json")));
+	}
+
+	#[test]
+	fn compile_patterns_returns_compiled_lists() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(&dir, "a.json", full_config_json());
+
+		let (exclude, interpolation) = load_config(&path).unwrap().compile_patterns().unwrap();
+
+		assert_eq!(exclude.len(), 1);
+		assert_eq!(interpolation.len(), 1);
+	}
+
+	#[test]
+	fn compile_patterns_errors_on_invalid_exclude_pattern() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": ["a..b"],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let err = load_config(&path).unwrap().compile_patterns().unwrap_err();
+
+		assert!(format!("{err:#}").contains("excludePatterns"));
+	}
+
+	#[test]
+	fn compile_patterns_errors_on_invalid_interpolation_regex() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": ["["],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let err = load_config(&path).unwrap().compile_patterns().unwrap_err();
+
+		assert!(format!("{err:#}").contains("interpolationPatterns"));
+	}
+
+	#[test]
+	fn validate_numbers_errors_when_batch_size_is_zero() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 0,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let err = load_config(&path).unwrap().validate_numbers().unwrap_err();
+
+		assert!(format!("{err:#}").contains("batchSize"));
+	}
+
+	#[test]
+	fn validate_numbers_errors_when_parallel_batches_is_zero() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 0,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let err = load_config(&path).unwrap().validate_numbers().unwrap_err();
+
+		assert!(format!("{err:#}").contains("parallelBatches"));
 	}
 
 	#[test]
@@ -72,9 +257,13 @@ mod tests {
 			&dir,
 			"a.json",
 			r#"{
-				"baseDirectory": ".",
-				"referenceI18n": "en",
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
 				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "gemini-api"
 			}"#,
 		);
@@ -91,26 +280,27 @@ mod tests {
 			&dir,
 			"a.json",
 			r#"{
-				"baseDirectory": ".",
-				"referenceI18n": "en",
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
 				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "openai"
 			}"#,
 		);
 
 		let err = load_config(&path).unwrap_err();
-		let err_text = format!("{err:#}");
+		let text = format!("{err:#}");
 
-		assert!(
-			err_text.contains("claude-code") && err_text.contains("gemini-api"),
-			"error should mention valid variants: {err_text}"
-		);
+		assert!(text.contains("claude-code") && text.contains("gemini-api"));
 	}
 
 	#[test]
 	fn rejects_missing_required_fields() {
 		let dir = TempDir::new().unwrap();
-		let path = write_config(&dir, "a.json", r#"{"baseDirectory": "."}"#);
+		let path = write_config(&dir, "a.json", r#"{"batchSize": 50}"#);
 
 		assert!(load_config(&path).is_err());
 	}
@@ -138,9 +328,13 @@ mod tests {
 			&dir,
 			"a.json",
 			r#"{
-				"baseDirectory": "./locales",
-				"referenceI18n": "en",
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
 				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code",
 				"mode": "SYNC",
 				"some_other_field": 42
@@ -149,6 +343,6 @@ mod tests {
 
 		let config = load_config(&path).unwrap();
 
-		assert_eq!(config.base_directory, PathBuf::from("./locales"));
+		assert_eq!(config.batch_size, 50);
 	}
 }

@@ -6,6 +6,7 @@ use tokio::io::AsyncWriteExt;
 
 pub async fn write_i18n_tree_map(
 	definition: &I18nDefinition,
+	indent: &[u8],
 	reference_json_dict: &Map<String, Value>,
 	initial_json_dict: Map<String, Value>,
 	json_tree_map_list: &[Vec<(String, String)>],
@@ -19,33 +20,33 @@ pub async fn write_i18n_tree_map(
 	}
 
 	let cleaned_json_dict = remove_keys_absent_from_reference_dict(reference_json_dict, &translated_json_dict);
-	let serialized = serialize_pretty(&cleaned_json_dict).map_err(|source| J18nError::Json {
-		path: definition.json_file_path.clone(),
+	let serialized = serialize_pretty(&cleaned_json_dict, indent).map_err(|source| J18nError::Json {
+		path: definition.file.clone(),
 		source,
 	})?;
 
-	if let Some(parent) = definition.json_file_path.parent() {
+	if let Some(parent) = definition.file.parent() {
 		fs::create_dir_all(parent).await.map_err(|source| J18nError::Io {
 			path: parent.to_path_buf(),
 			source,
 		})?;
 	}
 
-	let mut file = fs::File::create(&definition.json_file_path)
+	let mut file = fs::File::create(&definition.file)
 		.await
 		.map_err(|source| J18nError::Io {
-			path: definition.json_file_path.clone(),
+			path: definition.file.clone(),
 			source,
 		})?;
 
 	file.write_all(serialized.as_bytes())
 		.await
 		.map_err(|source| J18nError::Io {
-			path: definition.json_file_path.clone(),
+			path: definition.file.clone(),
 			source,
 		})?;
 	file.write_all(b"\n").await.map_err(|source| J18nError::Io {
-		path: definition.json_file_path.clone(),
+		path: definition.file.clone(),
 		source,
 	})?;
 
@@ -97,8 +98,8 @@ fn remove_keys_absent_from_reference_dict(
 	result
 }
 
-fn serialize_pretty(value: &Map<String, Value>) -> Result<String, serde_json::Error> {
-	let formatter = serde_json::ser::PrettyFormatter::with_indent(b"\t");
+fn serialize_pretty(value: &Map<String, Value>, indent: &[u8]) -> Result<String, serde_json::Error> {
+	let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
 	let mut buffer = Vec::new();
 	let mut serializer = serde_json::Serializer::with_formatter(&mut buffer, formatter);
 
@@ -110,7 +111,6 @@ fn serialize_pretty(value: &Map<String, Value>) -> Result<String, serde_json::Er
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use j18n_core::Language;
 	use tempfile::TempDir;
 	use tokio::fs;
 
@@ -119,22 +119,41 @@ mod tests {
 	}
 
 	fn definition_in(dir: &TempDir, code: &str) -> I18nDefinition {
-		I18nDefinition::from_base_dir(dir.path(), Language::from_iso_639_code(code).unwrap())
+		I18nDefinition {
+			file: dir.path().join(format!("{code}.json")),
+			language: code.to_string(),
+		}
 	}
 
 	#[tokio::test]
-	async fn writes_tab_indented_json_with_trailing_newline() {
+	async fn writes_with_supplied_indentation_and_trailing_newline() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "pt");
 		let reference = parse(r#"{"a": "x"}"#);
 		let initial = reference.clone();
 		let translations = vec![vec![("a".to_string(), "y".to_string())]];
 
-		write_i18n_tree_map(&definition, &reference, initial, &translations).await.unwrap();
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+			.await
+			.unwrap();
 
-		let written = fs::read_to_string(&definition.json_file_path).await.unwrap();
+		let written = fs::read_to_string(&definition.file).await.unwrap();
 
 		assert_eq!(written, "{\n\t\"a\": \"y\"\n}\n");
+	}
+
+	#[tokio::test]
+	async fn writes_with_two_space_indent_when_requested() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"a": "x"}"#);
+		let initial = reference.clone();
+
+		write_i18n_tree_map(&definition, b"  ", &reference, initial, &[]).await.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+
+		assert_eq!(written, "{\n  \"a\": \"x\"\n}\n");
 	}
 
 	#[tokio::test]
@@ -148,9 +167,11 @@ mod tests {
 			("section.b".to_string(), "BB".to_string()),
 		]];
 
-		write_i18n_tree_map(&definition, &reference, initial, &translations).await.unwrap();
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+			.await
+			.unwrap();
 
-		let written = fs::read_to_string(&definition.json_file_path).await.unwrap();
+		let written = fs::read_to_string(&definition.file).await.unwrap();
 		let parsed: Map<String, Value> = serde_json::from_str(&written).unwrap();
 
 		assert_eq!(parsed["section"]["a"], "AA");
@@ -164,9 +185,9 @@ mod tests {
 		let reference = parse(r#"{"keep": "K"}"#);
 		let initial = parse(r#"{"keep": "K", "stale": "S"}"#);
 
-		write_i18n_tree_map(&definition, &reference, initial, &[]).await.unwrap();
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[]).await.unwrap();
 
-		let written = fs::read_to_string(&definition.json_file_path).await.unwrap();
+		let written = fs::read_to_string(&definition.file).await.unwrap();
 		let parsed: Map<String, Value> = serde_json::from_str(&written).unwrap();
 
 		assert!(parsed.contains_key("keep"));
@@ -180,9 +201,9 @@ mod tests {
 		let reference = parse(r#"{"section": {"keep": "K"}}"#);
 		let initial = parse(r#"{"section": {"keep": "K", "stale": "S"}}"#);
 
-		write_i18n_tree_map(&definition, &reference, initial, &[]).await.unwrap();
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[]).await.unwrap();
 
-		let written = fs::read_to_string(&definition.json_file_path).await.unwrap();
+		let written = fs::read_to_string(&definition.file).await.unwrap();
 		let parsed: Map<String, Value> = serde_json::from_str(&written).unwrap();
 
 		assert!(parsed["section"].as_object().unwrap().contains_key("keep"));
@@ -194,14 +215,14 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let nested_dir = dir.path().join("does/not/exist");
 		let definition = I18nDefinition {
-			json_file_path: nested_dir.join("pt.json"),
-			language: Language::from_iso_639_code("pt").unwrap(),
+			file: nested_dir.join("pt.json"),
+			language: "pt".to_string(),
 		};
 		let reference = parse(r#"{"a": "x"}"#);
 		let initial = reference.clone();
 
-		write_i18n_tree_map(&definition, &reference, initial, &[]).await.unwrap();
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[]).await.unwrap();
 
-		assert!(definition.json_file_path.exists());
+		assert!(definition.file.exists());
 	}
 }

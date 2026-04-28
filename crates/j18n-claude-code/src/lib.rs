@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use j18n_core::{J18nError, J18nResult, Language};
-use j18n_translator::{create_extrapolated_values, restore_extrapolated_values, ExtrapolatedValue, I18nTranslator};
+use j18n_core::{J18nError, J18nResult};
+use j18n_translator::I18nTranslator;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -22,14 +22,16 @@ impl ClaudeCodeExecutor for DefaultClaudeCodeExecutor {
 }
 
 pub struct ClaudeCodeBasedI18nTranslator<E: ClaudeCodeExecutor = DefaultClaudeCodeExecutor> {
+	additional_prompts: Vec<String>,
 	executor: E,
 }
 
 impl ClaudeCodeBasedI18nTranslator<DefaultClaudeCodeExecutor> {
 	pub const TRANSLATOR_ID: &'static str = "claude-code";
 
-	pub fn new() -> Self {
+	pub fn new(additional_prompts: Vec<String>) -> Self {
 		Self {
+			additional_prompts,
 			executor: DefaultClaudeCodeExecutor,
 		}
 	}
@@ -37,13 +39,15 @@ impl ClaudeCodeBasedI18nTranslator<DefaultClaudeCodeExecutor> {
 
 impl<E: ClaudeCodeExecutor> ClaudeCodeBasedI18nTranslator<E> {
 	pub fn with_executor(executor: E) -> Self {
-		Self { executor }
+		Self {
+			additional_prompts: Vec::new(),
+			executor,
+		}
 	}
-}
 
-impl Default for ClaudeCodeBasedI18nTranslator<DefaultClaudeCodeExecutor> {
-	fn default() -> Self {
-		Self::new()
+	pub fn with_additional_prompts(mut self, additional_prompts: Vec<String>) -> Self {
+		self.additional_prompts = additional_prompts;
+		self
 	}
 }
 
@@ -53,55 +57,47 @@ impl<E: ClaudeCodeExecutor> I18nTranslator for ClaudeCodeBasedI18nTranslator<E> 
 		"claude-code"
 	}
 
-	async fn translate_i18n_values(
+	async fn translate_values(
 		&self,
-		from: Language,
-		to: Language,
+		from_language: &str,
+		to_language: &str,
 		values: Vec<String>,
 	) -> J18nResult<Vec<String>> {
-		let extrapolated_values = create_extrapolated_values(&values);
-		let translated_values = translate_extrapolated_values(&self.executor, &extrapolated_values, from, to).await?;
+		let values_for_prompt_serialized = serde_json::to_string(&values)
+			.map_err(|e| J18nError::translator(format!("failed to serialize prompt array: {e}")))?;
+		let prompt = build_prompt(
+			from_language,
+			to_language,
+			&self.additional_prompts,
+			&values_for_prompt_serialized,
+		);
+		let response = self.executor.execute(&prompt).await?;
 
-		restore_extrapolated_values(&extrapolated_values, &translated_values)
+		Ok(response
+			.split(ENTRY_SEPARATOR)
+			.map(|s| s.trim().to_string())
+			.filter(|s| !s.is_empty())
+			.collect())
 	}
 }
 
-async fn translate_extrapolated_values<E: ClaudeCodeExecutor>(
-	executor: &E,
-	extrapolated_values: &[ExtrapolatedValue],
-	from: Language,
-	to: Language,
-) -> J18nResult<Vec<String>> {
-	let extrapolated_for_prompt: Vec<&str> = extrapolated_values
-		.iter()
-		.map(|v| v.extrapolated_value.as_str())
-		.collect();
-	let values_for_prompt_serialized = serde_json::to_string(&extrapolated_for_prompt)
-		.map_err(|e| J18nError::translator(format!("failed to serialize prompt array: {e}")))?;
-	let prompt = build_prompt(from, to, &values_for_prompt_serialized);
-	let response = executor.execute(&prompt).await?;
-
-	Ok(response
-		.split(ENTRY_SEPARATOR)
-		.map(|s| s.trim().to_string())
-		.filter(|s| !s.is_empty())
-		.collect())
-}
-
-fn build_prompt(from: Language, to: Language, values_for_prompt_serialized: &str) -> String {
-	[
-		format!(
-			"Translate the values in the following JSON array, from {} to {}.",
-			from.language_name(),
-			to.language_name()
-		),
-		"Consider that the context for the translation is a music streaming app.".to_string(),
+fn build_prompt(
+	from_language: &str,
+	to_language: &str,
+	additional_prompts: &[String],
+	values_for_prompt_serialized: &str,
+) -> String {
+	let mut lines: Vec<String> = vec![
+		format!("Translate the values in the following JSON array, from {from_language} to {to_language}."),
 		"DO NOT remove or modify HTML tags.".to_string(),
 		"DO NOT remove, skip or modify placeholders, like [1], [2], [3], etc.".to_string(),
-		"DO NOT translate the words 'artwork', 'feedback', 'playlist' and 'playlists'.".to_string(),
-		"DO NOT translate the words 'touch', 'touch name', or anything else that might resemble a click or touch."
-			.to_string(),
-		"The word 'track' should be interpreted as 'song' when translating it.".to_string(),
+	];
+
+	for prompt in additional_prompts {
+		lines.push(prompt.clone());
+	}
+
+	lines.extend([
 		"Once again, DO NOT remove placeholders like '[1]', '[2]', '[3]', '[4]', etc.".to_string(),
 		format!(
 			"Answer ONLY with the translated values, one per line, each separated by the exact string '{ENTRY_SEPARATOR}' on its own line, in the same order as the inputs."
@@ -111,8 +107,9 @@ fn build_prompt(from: Language, to: Language, values_for_prompt_serialized: &str
 		),
 		"The JSON array of values to translate is:".to_string(),
 		values_for_prompt_serialized.to_string(),
-	]
-	.join("\n")
+	]);
+
+	lines.join("\n")
 }
 
 async fn execute_claude_code(prompt: &str) -> J18nResult<String> {
@@ -213,21 +210,16 @@ mod tests {
 		}
 	}
 
-	fn portuguese() -> Language {
-		Language::from_iso_639_code("pt").unwrap()
-	}
+	const ENGLISH: &str = "English";
+	const PORTUGUESE: &str = "Portuguese";
 
 	#[tokio::test]
-	async fn translates_simple_values_via_separator() {
+	async fn translates_values_via_separator() {
 		let (executor, captured) = MockExecutor::ok("olá<<<SEP>>>mundo");
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		let translated = translator
-			.translate_i18n_values(
-				Language::ENGLISH,
-				portuguese(),
-				vec!["hello".into(), "world".into()],
-			)
+			.translate_values(ENGLISH, PORTUGUESE, vec!["hello".into(), "world".into()])
 			.await
 			.unwrap();
 
@@ -236,33 +228,16 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn restores_interpolations_after_translation() {
-		let (executor, _) = MockExecutor::ok("Olá [0]!");
+	async fn returns_response_strings_verbatim_after_trim() {
+		let (executor, _) = MockExecutor::ok("  Olá [0]!  ");
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		let translated = translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["Hello {{name}}!".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hello [0]!".into()])
 			.await
 			.unwrap();
 
-		assert_eq!(translated, vec!["Olá {{name}}!".to_string()]);
-	}
-
-	#[tokio::test]
-	async fn fails_when_response_count_does_not_match_input() {
-		let (executor, _) = MockExecutor::ok("only-one");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
-
-		let err = translator
-			.translate_i18n_values(
-				Language::ENGLISH,
-				portuguese(),
-				vec!["a".into(), "b".into()],
-			)
-			.await
-			.unwrap_err();
-
-		assert!(matches!(err, J18nError::Translator(_)));
+		assert_eq!(translated, vec!["Olá [0]!".to_string()]);
 	}
 
 	#[tokio::test]
@@ -271,7 +246,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		let err = translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["a".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["a".into()])
 			.await
 			.unwrap_err();
 
@@ -282,12 +257,12 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn prompt_includes_language_names_and_extrapolated_values() {
-		let (executor, captured) = MockExecutor::ok("Olá [0]");
+	async fn prompt_includes_language_names_and_values() {
+		let (executor, captured) = MockExecutor::ok("Olá");
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["Hi {{name}}".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()])
 			.await
 			.unwrap();
 
@@ -295,14 +270,81 @@ mod tests {
 		let prompt = &prompts[0];
 
 		assert!(prompt.contains("from English to Portuguese"));
-		assert!(prompt.contains("[\"Hi [0]\"]"));
+		assert!(prompt.contains("[\"Hi\"]"));
 		assert!(prompt.contains(ENTRY_SEPARATOR));
+	}
+
+	#[tokio::test]
+	async fn prompt_no_longer_mentions_music_specific_terms() {
+		let (executor, captured) = MockExecutor::ok("X");
+		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
+
+		translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.await
+			.unwrap();
+
+		let prompts = captured.lock().unwrap();
+		let prompt = &prompts[0];
+
+		for forbidden in ["music", "playlist", "track", "song", "artwork", "touch"] {
+			assert!(
+				!prompt.to_lowercase().contains(forbidden),
+				"prompt contains forbidden term \"{forbidden}\": {prompt}"
+			);
+		}
 	}
 
 	#[test]
 	fn translator_id_is_claude_code() {
-		let translator = ClaudeCodeBasedI18nTranslator::new();
+		let translator = ClaudeCodeBasedI18nTranslator::new(Vec::new());
 
 		assert_eq!(translator.translator_id(), "claude-code");
+	}
+
+	#[tokio::test]
+	async fn additional_prompts_are_injected_between_placeholder_warnings() {
+		let (executor, captured) = MockExecutor::ok("X");
+		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor).with_additional_prompts(vec![
+			"INJECTED-CONTEXT-A".to_string(),
+			"INJECTED-CONTEXT-B".to_string(),
+		]);
+
+		translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.await
+			.unwrap();
+
+		let prompts = captured.lock().unwrap();
+		let prompt = &prompts[0];
+		let placeholder_position = prompt
+			.find("DO NOT remove, skip or modify placeholders")
+			.expect("first placeholder warning must be present");
+		let injected_a_position = prompt.find("INJECTED-CONTEXT-A").expect("injected line A missing");
+		let injected_b_position = prompt.find("INJECTED-CONTEXT-B").expect("injected line B missing");
+		let reminder_position = prompt
+			.find("Once again, DO NOT remove placeholders")
+			.expect("placeholder reminder must be present");
+
+		assert!(placeholder_position < injected_a_position);
+		assert!(injected_a_position < injected_b_position);
+		assert!(injected_b_position < reminder_position);
+	}
+
+	#[tokio::test]
+	async fn no_additional_prompts_means_no_extra_lines_in_prompt() {
+		let (executor, captured) = MockExecutor::ok("X");
+		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
+
+		translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.await
+			.unwrap();
+
+		let prompts = captured.lock().unwrap();
+		let prompt = &prompts[0];
+
+		assert!(prompt.contains("DO NOT remove, skip or modify placeholders"));
+		assert!(prompt.contains("Once again, DO NOT remove placeholders"));
 	}
 }

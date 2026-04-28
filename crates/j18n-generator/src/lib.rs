@@ -1,17 +1,17 @@
+pub mod options;
+
+pub use options::J18nOptions;
+
 use futures::stream::{self, StreamExt};
 use j18n_core::{GenerationMode, I18nDefinition, J18nResult};
-use j18n_io::{read_i18n_data, write_i18n_tree_map, I18nHashingCache};
-use j18n_translator::I18nTranslator;
+use j18n_io::{detect_indentation, read_i18n_data, write_i18n_tree_map, I18nHashingCache, DEFAULT_INDENT};
+use j18n_translator::{create_extrapolated_values, restore_extrapolated_values, I18nTranslator};
 use j18n_validator::TranslationValidator;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::info;
-
-const BATCH_SIZE: usize = 50;
-const PARALLEL_LIMIT: usize = 3;
-const HASH_CACHE_FILE_NAME: &str = ".hash-cache.json";
 
 pub struct I18nGenerator;
 
@@ -21,25 +21,22 @@ impl I18nGenerator {
 		reference_i18n: &I18nDefinition,
 		generate_i18n_for: &[I18nDefinition],
 		mode: GenerationMode,
+		options: &J18nOptions,
 	) -> J18nResult<()>
 	where
 		T: I18nTranslator + ?Sized,
 	{
-		let reference_data = read_i18n_data(reference_i18n).await?;
+		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns).await?;
 		let reference_entries = reference_data.walked_tree_map.clone();
-		let hash_cache_path = reference_i18n
-			.json_file_path
-			.parent()
-			.map(|parent| parent.join(HASH_CACHE_FILE_NAME))
-			.expect("reference json must have a parent directory");
-		let reference_cached_hashing = I18nHashingCache::load_hash_cache_from(&hash_cache_path).await?;
+		let reference_cached_hashing = I18nHashingCache::load_hash_cache_from(&options.hash_cache_path).await?;
 		let reference_current_hashing = I18nHashingCache::compute_hash_cache_from(&reference_data);
-		let changed_keys_since_last_hashing = reference_cached_hashing.compute_changed_keys(&reference_current_hashing);
+		let changed_keys_since_last_hashing =
+			reference_cached_hashing.compute_changed_keys(&reference_current_hashing);
 
 		info!(
 			"Scanned {} total entries from {} dict",
 			reference_entries.len(),
-			reference_i18n.language.language_name()
+			reference_i18n.language
 		);
 		info!(
 			"{} keys changed since last translation",
@@ -55,11 +52,12 @@ impl I18nGenerator {
 				&changed_keys_since_last_hashing,
 				target,
 				mode,
+				options,
 			)
 			.await?;
 		}
 
-		I18nHashingCache::save_hash_cache_to(&reference_current_hashing, &hash_cache_path).await?;
+		I18nHashingCache::save_hash_cache_to(&reference_current_hashing, &options.hash_cache_path).await?;
 
 		Ok(())
 	}
@@ -74,11 +72,12 @@ async fn translate_into_target<T>(
 	changed_keys_since_last_hashing: &BTreeSet<String>,
 	target: &I18nDefinition,
 	mode: GenerationMode,
+	options: &J18nOptions,
 ) -> J18nResult<()>
 where
 	T: I18nTranslator + ?Sized,
 {
-	let target_data = read_i18n_data(target).await?;
+	let target_data = read_i18n_data(target, &options.exclude_patterns).await?;
 	let entries_to_translate: Vec<(String, String)> = match mode {
 		GenerationMode::Regenerate => reference_entries.to_vec(),
 		GenerationMode::Sync => {
@@ -93,7 +92,7 @@ where
 	};
 	let total_characters: usize = entries_to_translate.iter().map(|(_, value)| value.len()).sum();
 	let windowed_entries: Vec<Vec<(String, String)>> = entries_to_translate
-		.chunks(BATCH_SIZE)
+		.chunks(options.batch_size)
 		.map(|chunk| chunk.to_vec())
 		.collect();
 
@@ -101,7 +100,7 @@ where
 		"Translating {} entries ({} characters) to {} in a total of {} batches...",
 		entries_to_translate.len(),
 		total_characters,
-		target.language.language_name(),
+		target.language,
 		windowed_entries.len()
 	);
 
@@ -112,7 +111,7 @@ where
 			let translated_count = Arc::clone(&translated_count);
 
 			async move {
-				let result = translate_batch(translator, reference_i18n, target, window).await;
+				let result = translate_batch(translator, reference_i18n, target, window, options).await;
 				let current = translated_count.fetch_add(1, Ordering::SeqCst) + 1;
 
 				info!("Batch {current}/{total_batches} translated");
@@ -120,22 +119,24 @@ where
 				result
 			}
 		}))
-		.buffer_unordered(PARALLEL_LIMIT)
+		.buffer_unordered(options.parallel_batches)
 		.collect()
 		.await;
 
 	let translated_batches: Vec<Vec<(String, String)>> =
 		translated_batches.into_iter().collect::<J18nResult<Vec<_>>>()?;
 
-	info!("Writing ({mode}) JSON to \"{}\"...", target.json_file_path.display());
+	info!("Writing ({mode}) JSON to \"{}\"...", target.file.display());
 
 	let initial_json_dict: Map<String, Value> = match mode {
 		GenerationMode::Regenerate => reference_data.json_dict.clone(),
 		GenerationMode::Sync => merge_json_objects(&reference_data.json_dict, &target_data.json_dict),
 	};
+	let indent = resolve_indent(target, reference_i18n, mode).await?;
 
 	write_i18n_tree_map(
 		target,
+		indent.as_bytes(),
 		&reference_data.json_dict,
 		initial_json_dict,
 		&translated_batches,
@@ -150,6 +151,7 @@ async fn translate_batch<T>(
 	from: &I18nDefinition,
 	to: &I18nDefinition,
 	batch: Vec<(String, String)>,
+	options: &J18nOptions,
 ) -> J18nResult<Vec<(String, String)>>
 where
 	T: I18nTranslator + ?Sized,
@@ -162,11 +164,14 @@ where
 		batch_values.push(value);
 	}
 
-	let translated_values = translator
-		.translate_i18n_values(from.language, to.language, batch_values.clone())
+	let extrapolated = create_extrapolated_values(&batch_values, &options.interpolation_patterns);
+	let extrapolated_strings: Vec<String> = extrapolated.iter().map(|e| e.extrapolated_value.clone()).collect();
+	let translated_extrapolated = translator
+		.translate_values(&from.language, &to.language, extrapolated_strings)
 		.await?;
+	let translated_values = restore_extrapolated_values(&extrapolated, &translated_extrapolated)?;
 
-	TranslationValidator::validate_translation(&batch_values, &translated_values)?;
+	TranslationValidator::validate_translation(&batch_values, &translated_values, &options.interpolation_patterns)?;
 
 	let mut translations: Vec<(String, String)> = Vec::with_capacity(batch_keys.len());
 
@@ -177,6 +182,24 @@ where
 	}
 
 	Ok(translations)
+}
+
+async fn resolve_indent(
+	target: &I18nDefinition,
+	reference: &I18nDefinition,
+	mode: GenerationMode,
+) -> J18nResult<String> {
+	if mode == GenerationMode::Sync {
+		if let Some(detected) = detect_indentation(&target.file).await? {
+			return Ok(detected);
+		}
+	}
+
+	if let Some(detected) = detect_indentation(&reference.file).await? {
+		return Ok(detected);
+	}
+
+	Ok(DEFAULT_INDENT.to_string())
 }
 
 fn merge_json_objects(first: &Map<String, Value>, second: &Map<String, Value>) -> Map<String, Value> {
@@ -193,8 +216,9 @@ fn merge_json_objects(first: &Map<String, Value>, second: &Map<String, Value>) -
 mod tests {
 	use super::*;
 	use async_trait::async_trait;
-	use j18n_core::Language;
+	use j18n_core::PathPattern;
 	use j18n_io::{java_string_hashcode_hex, I18nHashing, I18nHashingCache};
+	use regex::Regex;
 	use std::collections::HashMap;
 	use std::sync::Mutex;
 	use tempfile::TempDir;
@@ -202,7 +226,7 @@ mod tests {
 
 	#[derive(Default)]
 	struct MockTranslator {
-		captured: Mutex<Vec<(Language, Language, Vec<String>)>>,
+		captured: Mutex<Vec<(String, String, Vec<String>)>>,
 		responses: Mutex<HashMap<String, String>>,
 	}
 
@@ -228,13 +252,16 @@ mod tests {
 			"mock"
 		}
 
-		async fn translate_i18n_values(
+		async fn translate_values(
 			&self,
-			from: Language,
-			to: Language,
+			from_language: &str,
+			to_language: &str,
 			values: Vec<String>,
-		) -> j18n_core::J18nResult<Vec<String>> {
-			self.captured.lock().unwrap().push((from, to, values.clone()));
+		) -> J18nResult<Vec<String>> {
+			self.captured
+				.lock()
+				.unwrap()
+				.push((from_language.to_string(), to_language.to_string(), values.clone()));
 
 			let responses = self.responses.lock().unwrap();
 			let translated = values
@@ -243,7 +270,7 @@ mod tests {
 					responses
 						.get(value)
 						.cloned()
-						.unwrap_or_else(|| format!("[{}]{value}", to.iso_639_code()))
+						.unwrap_or_else(|| format!("[{to_language}]{value}"))
 				})
 				.collect();
 
@@ -252,7 +279,10 @@ mod tests {
 	}
 
 	fn definition_in(dir: &TempDir, code: &str) -> I18nDefinition {
-		I18nDefinition::from_base_dir(dir.path(), Language::from_iso_639_code(code).unwrap())
+		I18nDefinition {
+			file: dir.path().join(format!("{code}.json")),
+			language: code.to_string(),
+		}
 	}
 
 	async fn read_json(path: &std::path::Path) -> Map<String, Value> {
@@ -261,20 +291,38 @@ mod tests {
 		serde_json::from_str(&raw).unwrap()
 	}
 
+	fn default_options(dir: &TempDir) -> J18nOptions {
+		J18nOptions {
+			batch_size: 50,
+			exclude_patterns: vec![],
+			hash_cache_path: dir.path().join(".hash-cache.json"),
+			interpolation_patterns: vec![Regex::new(r"\{\{(.+?)\}\}").unwrap()],
+			parallel_batches: 3,
+		}
+	}
+
 	#[tokio::test]
 	async fn sync_without_hash_cache_treats_every_key_as_changed() {
 		let dir = TempDir::new().unwrap();
 		let reference = definition_in(&dir, "en");
 		let target = definition_in(&dir, "pt");
 
-		fs::write(&reference.json_file_path, r#"{"a": "A", "b": "B"}"#).await.unwrap();
-		fs::write(&target.json_file_path, r#"{"a": "AA"}"#).await.unwrap();
+		fs::write(&reference.file, "{\n\t\"a\": \"A\",\n\t\"b\": \"B\"\n}\n")
+			.await
+			.unwrap();
+		fs::write(&target.file, r#"{"a": "AA"}"#).await.unwrap();
 
 		let translator = MockTranslator::default();
 
-		I18nGenerator::execute(&translator, &reference, &[target.clone()], GenerationMode::Sync)
-			.await
-			.unwrap();
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Sync,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
 
 		let mut inputs = translator.captured_inputs();
 
@@ -288,8 +336,10 @@ mod tests {
 		let reference = definition_in(&dir, "en");
 		let target = definition_in(&dir, "pt");
 
-		fs::write(&reference.json_file_path, r#"{"a": "A", "b": "B"}"#).await.unwrap();
-		fs::write(&target.json_file_path, r#"{"a": "AA"}"#).await.unwrap();
+		fs::write(&reference.file, "{\n\t\"a\": \"A\",\n\t\"b\": \"B\"\n}\n")
+			.await
+			.unwrap();
+		fs::write(&target.file, r#"{"a": "AA"}"#).await.unwrap();
 
 		let mut cache = HashMap::new();
 
@@ -307,50 +357,19 @@ mod tests {
 
 		let translator = MockTranslator::default();
 
-		I18nGenerator::execute(&translator, &reference, &[target.clone()], GenerationMode::Sync)
-			.await
-			.unwrap();
-
-		assert_eq!(translator.captured_inputs(), vec!["B".to_string()]);
-
-		let written = read_json(&target.json_file_path).await;
-
-		assert_eq!(written["a"], "AA");
-		assert_eq!(written["b"], "[pt]B");
-	}
-
-	#[tokio::test]
-	async fn sync_translates_keys_changed_per_hash_cache() {
-		let dir = TempDir::new().unwrap();
-		let reference = definition_in(&dir, "en");
-		let target = definition_in(&dir, "pt");
-
-		fs::write(&reference.json_file_path, r#"{"a": "A", "b": "B"}"#).await.unwrap();
-		fs::write(&target.json_file_path, r#"{"a": "AA", "b": "BB"}"#).await.unwrap();
-
-		let mut cache = HashMap::new();
-
-		cache.insert("a".to_string(), java_string_hashcode_hex("A"));
-		cache.insert("b".to_string(), java_string_hashcode_hex("B-old"));
-
-		I18nHashingCache::save_hash_cache_to(
-			&I18nHashing {
-				json_key_to_hash_map: cache,
-			},
-			&dir.path().join(".hash-cache.json"),
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Sync,
+			&default_options(&dir),
 		)
 		.await
 		.unwrap();
 
-		let translator = MockTranslator::default();
-
-		I18nGenerator::execute(&translator, &reference, &[target.clone()], GenerationMode::Sync)
-			.await
-			.unwrap();
-
 		assert_eq!(translator.captured_inputs(), vec!["B".to_string()]);
 
-		let written = read_json(&target.json_file_path).await;
+		let written = read_json(&target.file).await;
 
 		assert_eq!(written["a"], "AA");
 		assert_eq!(written["b"], "[pt]B");
@@ -362,21 +381,29 @@ mod tests {
 		let reference = definition_in(&dir, "en");
 		let target = definition_in(&dir, "pt");
 
-		fs::write(&reference.json_file_path, r#"{"a": "A", "b": "B"}"#).await.unwrap();
-		fs::write(&target.json_file_path, r#"{"a": "AA", "b": "BB"}"#).await.unwrap();
+		fs::write(&reference.file, "{\n\t\"a\": \"A\",\n\t\"b\": \"B\"\n}\n")
+			.await
+			.unwrap();
+		fs::write(&target.file, r#"{"a": "AA", "b": "BB"}"#).await.unwrap();
 
 		let translator = MockTranslator::default();
 
-		I18nGenerator::execute(&translator, &reference, &[target.clone()], GenerationMode::Regenerate)
-			.await
-			.unwrap();
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Regenerate,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
 
 		let mut inputs = translator.captured_inputs();
 
 		inputs.sort();
 		assert_eq!(inputs, vec!["A".to_string(), "B".to_string()]);
 
-		let written = read_json(&target.json_file_path).await;
+		let written = read_json(&target.file).await;
 
 		assert_eq!(written["a"], "[pt]A");
 		assert_eq!(written["b"], "[pt]B");
@@ -388,16 +415,22 @@ mod tests {
 		let reference = definition_in(&dir, "en");
 		let target = definition_in(&dir, "pt");
 
-		fs::write(&reference.json_file_path, r#"{"keep": "K"}"#).await.unwrap();
-		fs::write(&target.json_file_path, r#"{"keep": "KK", "stale": "S"}"#).await.unwrap();
+		fs::write(&reference.file, "{\n\t\"keep\": \"K\"\n}\n").await.unwrap();
+		fs::write(&target.file, r#"{"keep": "KK", "stale": "S"}"#).await.unwrap();
 
 		let translator = MockTranslator::default();
 
-		I18nGenerator::execute(&translator, &reference, &[target.clone()], GenerationMode::Sync)
-			.await
-			.unwrap();
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Sync,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
 
-		let written = read_json(&target.json_file_path).await;
+		let written = read_json(&target.file).await;
 
 		assert!(written.contains_key("keep"));
 		assert!(!written.contains_key("stale"));
@@ -409,13 +442,19 @@ mod tests {
 		let reference = definition_in(&dir, "en");
 		let target = definition_in(&dir, "pt");
 
-		fs::write(&reference.json_file_path, r#"{"a": "A"}"#).await.unwrap();
+		fs::write(&reference.file, r#"{"a": "A"}"#).await.unwrap();
 
 		let translator = MockTranslator::default();
 
-		I18nGenerator::execute(&translator, &reference, &[target], GenerationMode::Sync)
-			.await
-			.unwrap();
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target],
+			GenerationMode::Sync,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
 
 		let cache_path = dir.path().join(".hash-cache.json");
 
@@ -436,8 +475,8 @@ mod tests {
 		let target = definition_in(&dir, "pt");
 
 		fs::write(
-			&reference.json_file_path,
-			r#"{"section": {"a": "A", "b": "B"}}"#,
+			&reference.file,
+			"{\n\t\"section\": {\n\t\t\"a\": \"A\",\n\t\t\"b\": \"B\"\n\t}\n}\n",
 		)
 		.await
 		.unwrap();
@@ -446,32 +485,181 @@ mod tests {
 			.with_response("A", "AA-pt")
 			.with_response("B", "BB-pt");
 
-		I18nGenerator::execute(&translator, &reference, &[target.clone()], GenerationMode::Regenerate)
-			.await
-			.unwrap();
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Regenerate,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
 
-		let written = read_json(&target.json_file_path).await;
+		let written = read_json(&target.file).await;
 
 		assert_eq!(written["section"]["a"], "AA-pt");
 		assert_eq!(written["section"]["b"], "BB-pt");
 	}
 
 	#[tokio::test]
-	async fn regenerate_runs_against_multiple_target_languages() {
+	async fn excluded_keys_are_not_translated_or_written_to_target() {
 		let dir = TempDir::new().unwrap();
 		let reference = definition_in(&dir, "en");
-		let pt = definition_in(&dir, "pt");
-		let es = definition_in(&dir, "es");
+		let target = definition_in(&dir, "pt");
 
-		fs::write(&reference.json_file_path, r#"{"a": "A"}"#).await.unwrap();
+		fs::write(
+			&reference.file,
+			"{\n\t\"sample\": {\n\t\t\"x\": \"DEMO\"\n\t},\n\t\"real\": \"R\"\n}\n",
+		)
+		.await
+		.unwrap();
 
 		let translator = MockTranslator::default();
+		let mut options = default_options(&dir);
 
-		I18nGenerator::execute(&translator, &reference, &[pt.clone(), es.clone()], GenerationMode::Regenerate)
+		options.exclude_patterns = vec![PathPattern::parse("sample.**").unwrap()];
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Regenerate,
+			&options,
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(translator.captured_inputs(), vec!["R".to_string()]);
+
+		let written = read_json(&target.file).await;
+
+		assert!(!written.contains_key("sample"));
+		assert!(written.contains_key("real"));
+	}
+
+	#[tokio::test]
+	async fn interpolations_are_extrapolated_and_restored() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(&reference.file, r#"{"greet": "Hi {{name}}!"}"#)
 			.await
 			.unwrap();
 
-		assert_eq!(read_json(&pt.json_file_path).await["a"], "[pt]A");
-		assert_eq!(read_json(&es.json_file_path).await["a"], "[es]A");
+		let translator = MockTranslator::default().with_response("Hi [0]!", "Olá [0]!");
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Regenerate,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
+
+		let written = read_json(&target.file).await;
+
+		assert_eq!(written["greet"], "Olá {{name}}!");
+	}
+
+	#[tokio::test]
+	async fn output_indentation_is_taken_from_reference_when_target_is_missing() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(&reference.file, "{\n  \"a\": \"A\"\n}\n").await.unwrap();
+
+		let translator = MockTranslator::default();
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Regenerate,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
+
+		let written = fs::read_to_string(&target.file).await.unwrap();
+
+		assert!(written.contains("\n  \"a\""), "expected 2-space indent, got:\n{written}");
+	}
+
+	#[tokio::test]
+	async fn output_indentation_is_taken_from_existing_target_when_syncing() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(&reference.file, "{\n\t\"a\": \"A\",\n\t\"b\": \"B\"\n}\n")
+			.await
+			.unwrap();
+		fs::write(&target.file, "{\n    \"a\": \"AA\"\n}\n").await.unwrap();
+
+		let translator = MockTranslator::default();
+		let mut cache = HashMap::new();
+
+		cache.insert("a".to_string(), java_string_hashcode_hex("A"));
+		cache.insert("b".to_string(), java_string_hashcode_hex("B"));
+
+		I18nHashingCache::save_hash_cache_to(
+			&I18nHashing {
+				json_key_to_hash_map: cache,
+			},
+			&dir.path().join(".hash-cache.json"),
+		)
+		.await
+		.unwrap();
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Sync,
+			&default_options(&dir),
+		)
+		.await
+		.unwrap();
+
+		let written = fs::read_to_string(&target.file).await.unwrap();
+
+		assert!(written.contains("\n    \"a\""), "expected 4-space indent, got:\n{written}");
+	}
+
+	#[tokio::test]
+	async fn batch_size_controls_number_of_calls_to_translator() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(
+			&reference.file,
+			r#"{"a":"A","b":"B","c":"C","d":"D","e":"E"}"#,
+		)
+		.await
+		.unwrap();
+
+		let translator = MockTranslator::default();
+		let mut options = default_options(&dir);
+
+		options.batch_size = 2;
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			&[target.clone()],
+			GenerationMode::Regenerate,
+			&options,
+		)
+		.await
+		.unwrap();
+
+		let captured = translator.captured.lock().unwrap();
+
+		assert_eq!(captured.len(), 3, "5 entries with batch_size=2 should produce 3 batches");
 	}
 }

@@ -12,6 +12,7 @@ j18n-core.workspace = true
 j18n-io.workspace = true
 j18n-translator.workspace = true
 j18n-validator.workspace = true
+regex.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

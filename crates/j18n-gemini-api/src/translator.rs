@@ -2,8 +2,8 @@ use crate::model::{
 	GeminiContent, GeminiPart, GenerateContentRequest, GenerateContentResponse, GenerationConfig,
 };
 use async_trait::async_trait;
-use j18n_core::{J18nError, J18nResult, Language};
-use j18n_translator::{create_extrapolated_values, restore_extrapolated_values, ExtrapolatedValue, I18nTranslator};
+use j18n_core::{J18nError, J18nResult};
+use j18n_translator::I18nTranslator;
 use reqwest::Client;
 use std::time::Duration;
 
@@ -81,6 +81,7 @@ impl GeminiTransport for DefaultGeminiTransport {
 }
 
 pub struct GeminiApiI18nTranslator<T: GeminiTransport = DefaultGeminiTransport> {
+	additional_prompts: Vec<String>,
 	model_name: String,
 	transport: T,
 }
@@ -88,13 +89,14 @@ pub struct GeminiApiI18nTranslator<T: GeminiTransport = DefaultGeminiTransport> 
 impl GeminiApiI18nTranslator<DefaultGeminiTransport> {
 	pub const TRANSLATOR_ID: &'static str = "gemini-api";
 
-	pub fn new() -> J18nResult<Self> {
+	pub fn new(additional_prompts: Vec<String>) -> J18nResult<Self> {
 		let api_key = std::env::var(GEMINI_API_KEY_ENV_VAR).map_err(|_| J18nError::EnvVarMissing {
 			name: GEMINI_API_KEY_ENV_VAR,
 		})?;
 		let transport = DefaultGeminiTransport::new(api_key, Duration::from_secs(180))?;
 
 		Ok(Self {
+			additional_prompts,
 			model_name: DEFAULT_MODEL_NAME.to_string(),
 			transport,
 		})
@@ -104,37 +106,20 @@ impl GeminiApiI18nTranslator<DefaultGeminiTransport> {
 impl<T: GeminiTransport> GeminiApiI18nTranslator<T> {
 	pub fn with_transport(transport: T) -> Self {
 		Self {
+			additional_prompts: Vec::new(),
 			model_name: DEFAULT_MODEL_NAME.to_string(),
 			transport,
 		}
 	}
 
-	pub fn with_model_name(mut self, model_name: impl Into<String>) -> Self {
-		self.model_name = model_name.into();
+	pub fn with_additional_prompts(mut self, additional_prompts: Vec<String>) -> Self {
+		self.additional_prompts = additional_prompts;
 		self
 	}
 
-	async fn translate_extrapolated_values(
-		&self,
-		extrapolated_values: &[ExtrapolatedValue],
-		from: Language,
-		to: Language,
-	) -> J18nResult<Vec<String>> {
-		let extrapolated_for_prompt: Vec<&str> = extrapolated_values
-			.iter()
-			.map(|v| v.extrapolated_value.as_str())
-			.collect();
-		let values_for_prompt_serialized = serde_json::to_string(&extrapolated_for_prompt)
-			.map_err(|e| J18nError::translator(format!("failed to serialize prompt array: {e}")))?;
-		let prompt = build_prompt(from, to);
-		let response_text = self.complete_chat(vec![prompt, values_for_prompt_serialized]).await?;
-		let parsed: Vec<String> = serde_json::from_str(response_text.trim()).map_err(|e| {
-			J18nError::translator(format!(
-				"Gemini did not return a JSON array of strings: {e}\nResponse:\n{response_text}"
-			))
-		})?;
-
-		Ok(parsed)
+	pub fn with_model_name(mut self, model_name: impl Into<String>) -> Self {
+		self.model_name = model_name.into();
+		self
 	}
 
 	async fn complete_chat(&self, messages: Vec<String>) -> J18nResult<String> {
@@ -181,42 +166,46 @@ impl<T: GeminiTransport> I18nTranslator for GeminiApiI18nTranslator<T> {
 		"gemini-api"
 	}
 
-	async fn translate_i18n_values(
+	async fn translate_values(
 		&self,
-		from: Language,
-		to: Language,
+		from_language: &str,
+		to_language: &str,
 		values: Vec<String>,
 	) -> J18nResult<Vec<String>> {
-		let extrapolated_values = create_extrapolated_values(&values);
-		let translated_values = self
-			.translate_extrapolated_values(&extrapolated_values, from, to)
-			.await?;
+		let values_for_prompt_serialized = serde_json::to_string(&values)
+			.map_err(|e| J18nError::translator(format!("failed to serialize prompt array: {e}")))?;
+		let prompt = build_prompt(from_language, to_language, &self.additional_prompts);
+		let response_text = self.complete_chat(vec![prompt, values_for_prompt_serialized]).await?;
+		let parsed: Vec<String> = serde_json::from_str(response_text.trim()).map_err(|e| {
+			J18nError::translator(format!(
+				"Gemini did not return a JSON array of strings: {e}\nResponse:\n{response_text}"
+			))
+		})?;
 
-		restore_extrapolated_values(&extrapolated_values, &translated_values)
+		Ok(parsed)
 	}
 }
 
-fn build_prompt(from: Language, to: Language) -> String {
-	[
-		format!(
-			"Translate the values in the following JSON array, from {} to {}.",
-			from.language_name(),
-			to.language_name()
-		),
-		"Consider that the context for the translation is a music streaming app.".to_string(),
+fn build_prompt(from_language: &str, to_language: &str, additional_prompts: &[String]) -> String {
+	let mut lines: Vec<String> = vec![
+		format!("Translate the values in the following JSON array, from {from_language} to {to_language}."),
 		"DO NOT remove or modify HTML tags.".to_string(),
 		"DO NOT remove, skip or modify placeholders, like [1], [2], [3], etc.".to_string(),
-		"DO NOT translate the words 'artwork', 'feedback', 'playlist' and 'playlists'.".to_string(),
-		"DO NOT translate the words 'touch', 'touch name', or anything else that might resemble a click or touch."
-			.to_string(),
-		"The word 'track' should be interpreted as 'song' when translating it.".to_string(),
+	];
+
+	for prompt in additional_prompts {
+		lines.push(prompt.clone());
+	}
+
+	lines.extend([
 		"Once again, DO NOT remove placeholders like '[1]', '[2]', '[3]', '[4]', etc.".to_string(),
 		"Answer ONLY with a JSON array containing string elements, one for each translated value, in the same order as their inputs.".to_string(),
 		"Do NOT embed the JSON array in Markdown, do NOT write '```json' or equivalents.".to_string(),
 		"Answer with a JSON array directly.".to_string(),
 		"The JSON array is:".to_string(),
-	]
-	.join("\n")
+	]);
+
+	lines.join("\n")
 }
 
 #[cfg(test)]
@@ -306,9 +295,8 @@ mod tests {
 		}
 	}
 
-	fn portuguese() -> Language {
-		Language::from_iso_639_code("pt").unwrap()
-	}
+	const ENGLISH: &str = "English";
+	const PORTUGUESE: &str = "Portuguese";
 
 	#[tokio::test]
 	async fn parses_json_array_response_into_translated_values() {
@@ -316,28 +304,11 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		let translated = translator
-			.translate_i18n_values(
-				Language::ENGLISH,
-				portuguese(),
-				vec!["hello".into(), "world".into()],
-			)
+			.translate_values(ENGLISH, PORTUGUESE, vec!["hello".into(), "world".into()])
 			.await
 			.unwrap();
 
 		assert_eq!(translated, vec!["olá".to_string(), "mundo".to_string()]);
-	}
-
-	#[tokio::test]
-	async fn restores_interpolations_after_translation() {
-		let (transport, _) = MockTransport::ok(r#"["Olá [0]!"]"#);
-		let translator = GeminiApiI18nTranslator::with_transport(transport);
-
-		let translated = translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["Hi {{name}}!".into()])
-			.await
-			.unwrap();
-
-		assert_eq!(translated, vec!["Olá {{name}}!".to_string()]);
 	}
 
 	#[tokio::test]
@@ -346,7 +317,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
 			.await
 			.unwrap();
 
@@ -361,7 +332,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport).with_model_name("custom-model");
 
 		translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
 			.await
 			.unwrap();
 
@@ -375,7 +346,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["Hi {{name}}".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi [0]".into()])
 			.await
 			.unwrap();
 
@@ -394,7 +365,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		let err = translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
 			.await
 			.unwrap_err();
 
@@ -406,7 +377,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(MockTransport::err());
 
 		let err = translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
 			.await
 			.unwrap_err();
 
@@ -434,7 +405,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(EmptyTransport);
 
 		let err = translator
-			.translate_i18n_values(Language::ENGLISH, portuguese(), vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
 			.await
 			.unwrap_err();
 
@@ -444,11 +415,61 @@ mod tests {
 		}
 	}
 
+	#[tokio::test]
+	async fn prompt_no_longer_mentions_music_specific_terms() {
+		let (transport, captured) = MockTransport::ok(r#"["X"]"#);
+		let translator = GeminiApiI18nTranslator::with_transport(transport);
+
+		translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.await
+			.unwrap();
+
+		let captured = captured.lock().unwrap();
+		let prompt = &captured[0].messages[0];
+
+		for forbidden in ["music", "playlist", "track", "song", "artwork", "touch"] {
+			assert!(
+				!prompt.to_lowercase().contains(forbidden),
+				"prompt contains forbidden term \"{forbidden}\": {prompt}"
+			);
+		}
+	}
+
 	#[test]
 	fn translator_id_is_gemini_api() {
 		let (transport, _) = MockTransport::ok(r#"["x"]"#);
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		assert_eq!(translator.translator_id(), "gemini-api");
+	}
+
+	#[tokio::test]
+	async fn additional_prompts_are_injected_between_placeholder_warnings() {
+		let (transport, captured) = MockTransport::ok(r#"["X"]"#);
+		let translator = GeminiApiI18nTranslator::with_transport(transport).with_additional_prompts(vec![
+			"INJECTED-CONTEXT-A".to_string(),
+			"INJECTED-CONTEXT-B".to_string(),
+		]);
+
+		translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.await
+			.unwrap();
+
+		let captured = captured.lock().unwrap();
+		let prompt = &captured[0].messages[0];
+		let placeholder_position = prompt
+			.find("DO NOT remove, skip or modify placeholders")
+			.expect("first placeholder warning must be present");
+		let injected_a_position = prompt.find("INJECTED-CONTEXT-A").expect("injected line A missing");
+		let injected_b_position = prompt.find("INJECTED-CONTEXT-B").expect("injected line B missing");
+		let reminder_position = prompt
+			.find("Once again, DO NOT remove placeholders")
+			.expect("placeholder reminder must be present");
+
+		assert!(placeholder_position < injected_a_position);
+		assert!(injected_a_position < injected_b_position);
+		assert!(injected_b_position < reminder_position);
 	}
 }

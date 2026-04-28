@@ -1,10 +1,10 @@
 use crate::json_walker::walk_json_tree_to_map;
-use j18n_core::{I18nData, I18nDefinition, J18nError, J18nResult};
+use j18n_core::{key_matches_any, I18nData, I18nDefinition, J18nError, J18nResult, PathPattern};
 use serde_json::{Map, Value};
 use tokio::fs;
 
-pub async fn read_i18n_data(definition: &I18nDefinition) -> J18nResult<I18nData> {
-	let path = &definition.json_file_path;
+pub async fn read_i18n_data(definition: &I18nDefinition, exclude_patterns: &[PathPattern]) -> J18nResult<I18nData> {
+	let path = &definition.file;
 
 	if !fs::try_exists(path).await.map_err(|source| J18nError::Io {
 		path: path.clone(),
@@ -17,13 +17,12 @@ pub async fn read_i18n_data(definition: &I18nDefinition) -> J18nResult<I18nData>
 		path: path.clone(),
 		source,
 	})?;
-	let mut json_dict: Map<String, Value> = serde_json::from_slice(&raw_bytes).map_err(|source| J18nError::Json {
-		path: path.clone(),
-		source,
-	})?;
-
-	json_dict.remove("sample");
-
+	let parsed_dict: Map<String, Value> =
+		serde_json::from_slice(&raw_bytes).map_err(|source| J18nError::Json {
+			path: path.clone(),
+			source,
+		})?;
+	let json_dict = filter_excluded(&parsed_dict, "", exclude_patterns);
 	let walked_tree_map = walk_json_tree_to_map(&json_dict);
 
 	Ok(I18nData {
@@ -32,15 +31,46 @@ pub async fn read_i18n_data(definition: &I18nDefinition) -> J18nResult<I18nData>
 	})
 }
 
+fn filter_excluded(json: &Map<String, Value>, prefix: &str, patterns: &[PathPattern]) -> Map<String, Value> {
+	let mut result = Map::new();
+
+	for (key, value) in json {
+		let path = if prefix.is_empty() {
+			key.clone()
+		} else {
+			format!("{prefix}.{key}")
+		};
+
+		if key_matches_any(&path, patterns) {
+			continue;
+		}
+
+		match value {
+			Value::Object(nested) => {
+				let filtered = filter_excluded(nested, &path, patterns);
+
+				result.insert(key.clone(), Value::Object(filtered));
+			}
+			other => {
+				result.insert(key.clone(), other.clone());
+			}
+		}
+	}
+
+	result
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use j18n_core::Language;
 	use tempfile::TempDir;
 	use tokio::fs;
 
 	fn definition_in(dir: &TempDir, code: &str) -> I18nDefinition {
-		I18nDefinition::from_base_dir(dir.path(), Language::from_iso_639_code(code).unwrap())
+		I18nDefinition {
+			file: dir.path().join(format!("{code}.json")),
+			language: code.to_string(),
+		}
 	}
 
 	#[tokio::test]
@@ -48,22 +78,22 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "en");
 
-		let data = read_i18n_data(&definition).await.unwrap();
+		let data = read_i18n_data(&definition, &[]).await.unwrap();
 
 		assert!(data.json_dict.is_empty());
 		assert!(data.walked_tree_map.is_empty());
 	}
 
 	#[tokio::test]
-	async fn parses_flat_object() {
+	async fn parses_flat_object_without_excludes() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "en");
 
-		fs::write(&definition.json_file_path, r#"{"a": "1", "b": "2"}"#)
+		fs::write(&definition.file, r#"{"a": "1", "b": "2"}"#)
 			.await
 			.unwrap();
 
-		let data = read_i18n_data(&definition).await.unwrap();
+		let data = read_i18n_data(&definition, &[]).await.unwrap();
 
 		assert_eq!(
 			data.walked_tree_map,
@@ -77,13 +107,13 @@ mod tests {
 		let definition = definition_in(&dir, "en");
 
 		fs::write(
-			&definition.json_file_path,
+			&definition.file,
 			r#"{"section": {"key": "value"}, "other": "x"}"#,
 		)
 		.await
 		.unwrap();
 
-		let data = read_i18n_data(&definition).await.unwrap();
+		let data = read_i18n_data(&definition, &[]).await.unwrap();
 
 		assert_eq!(
 			data.walked_tree_map,
@@ -92,21 +122,38 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn strips_root_level_sample_key() {
+	async fn excludes_keys_matching_top_level_pattern() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "en");
+
+		fs::write(&definition.file, r#"{"sample": "X", "real": "Y"}"#)
+			.await
+			.unwrap();
+
+		let patterns = vec![PathPattern::parse("sample").unwrap()];
+		let data = read_i18n_data(&definition, &patterns).await.unwrap();
+
+		assert!(!data.json_dict.contains_key("sample"));
+		assert_eq!(data.walked_tree_map, vec![("real".into(), "Y".into())]);
+	}
+
+	#[tokio::test]
+	async fn excludes_keys_matching_double_star_pattern() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "en");
 
 		fs::write(
-			&definition.json_file_path,
-			r#"{"sample": "X", "real": {"a": "Y"}}"#,
+			&definition.file,
+			r#"{"sample": {"a": "X", "b": "Y"}, "real": "Z"}"#,
 		)
 		.await
 		.unwrap();
 
-		let data = read_i18n_data(&definition).await.unwrap();
+		let patterns = vec![PathPattern::parse("sample.**").unwrap()];
+		let data = read_i18n_data(&definition, &patterns).await.unwrap();
 
 		assert!(!data.json_dict.contains_key("sample"));
-		assert_eq!(data.walked_tree_map, vec![("real.a".into(), "Y".into())]);
+		assert_eq!(data.walked_tree_map, vec![("real".into(), "Z".into())]);
 	}
 
 	#[tokio::test]
@@ -114,10 +161,10 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "en");
 
-		fs::write(&definition.json_file_path, "not json").await.unwrap();
+		fs::write(&definition.file, "not json").await.unwrap();
 
-		let err = read_i18n_data(&definition).await.unwrap_err();
+		let err = read_i18n_data(&definition, &[]).await.unwrap_err();
 
-		assert!(matches!(err, j18n_core::J18nError::Json { .. }));
+		assert!(matches!(err, J18nError::Json { .. }));
 	}
 }

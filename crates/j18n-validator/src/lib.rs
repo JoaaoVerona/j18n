@@ -1,8 +1,7 @@
-use j18n_core::{I18nData, I18nDefinition, J18nError, J18nResult};
+use j18n_core::{I18nData, I18nDefinition, J18nError, J18nResult, PathPattern};
 use j18n_io::read_i18n_data;
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use tracing::{info, warn};
 
 pub struct TranslationValidator;
@@ -11,27 +10,33 @@ impl TranslationValidator {
 	pub async fn validate_translations(
 		reference_i18n: &I18nDefinition,
 		generated_i18ns: &[I18nDefinition],
+		exclude_patterns: &[PathPattern],
+		interpolation_patterns: &[Regex],
 	) -> J18nResult<()> {
-		let reference_data = read_i18n_data(reference_i18n).await?;
+		let reference_data = read_i18n_data(reference_i18n, exclude_patterns).await?;
 
 		for generated in generated_i18ns {
 			info!(
 				"Validating {} ({}) with {} ({})...",
-				generated.language.language_name(),
-				generated.json_file_path.display(),
-				reference_i18n.language.language_name(),
-				reference_i18n.json_file_path.display()
+				generated.language,
+				generated.file.display(),
+				reference_i18n.language,
+				reference_i18n.file.display()
 			);
 
-			let generated_data = read_i18n_data(generated).await?;
+			let generated_data = read_i18n_data(generated, exclude_patterns).await?;
 
-			Self::validate_data(&reference_data, &generated_data)?;
+			Self::validate_data(&reference_data, &generated_data, interpolation_patterns)?;
 		}
 
 		Ok(())
 	}
 
-	pub fn validate_data(reference_data: &I18nData, generated_data: &I18nData) -> J18nResult<()> {
+	pub fn validate_data(
+		reference_data: &I18nData,
+		generated_data: &I18nData,
+		interpolation_patterns: &[Regex],
+	) -> J18nResult<()> {
 		let generated_lookup: HashMap<&str, &str> = generated_data
 			.walked_tree_map
 			.iter()
@@ -43,13 +48,17 @@ impl TranslationValidator {
 				.get(key.as_str())
 				.ok_or_else(|| J18nError::MissingTranslation { key: key.clone() })?;
 
-			check_interpolations(reference_value, generated_value);
+			check_interpolations(reference_value, generated_value, interpolation_patterns);
 		}
 
 		Ok(())
 	}
 
-	pub fn validate_translation(reference_values: &[String], generated_values: &[String]) -> J18nResult<()> {
+	pub fn validate_translation(
+		reference_values: &[String],
+		generated_values: &[String],
+		interpolation_patterns: &[Regex],
+	) -> J18nResult<()> {
 		if reference_values.len() != generated_values.len() {
 			return Err(J18nError::validation(format!(
 				"reference values size ({}) does not match generated values size ({})",
@@ -59,16 +68,16 @@ impl TranslationValidator {
 		}
 
 		for (reference, generated) in reference_values.iter().zip(generated_values.iter()) {
-			check_interpolations(reference, generated);
+			check_interpolations(reference, generated, interpolation_patterns);
 		}
 
 		Ok(())
 	}
 }
 
-fn check_interpolations(reference: &str, generated: &str) {
-	let reference_interpolations = find_interpolations(reference);
-	let generated_interpolations = find_interpolations(generated);
+fn check_interpolations(reference: &str, generated: &str, interpolation_patterns: &[Regex]) {
+	let reference_interpolations = find_interpolations(reference, interpolation_patterns);
+	let generated_interpolations = find_interpolations(generated, interpolation_patterns);
 
 	let same_count = reference_interpolations.len() == generated_interpolations.len();
 	let contains_all = reference_interpolations
@@ -80,39 +89,49 @@ fn check_interpolations(reference: &str, generated: &str) {
 	}
 }
 
-fn find_interpolations(value: &str) -> Vec<String> {
-	interpolations_regex()
-		.find_iter(value)
-		.map(|m| m.as_str().to_string())
-		.collect()
-}
+fn find_interpolations(value: &str, interpolation_patterns: &[Regex]) -> Vec<String> {
+	let mut matches = Vec::new();
 
-fn interpolations_regex() -> &'static Regex {
-	static INSTANCE: OnceLock<Regex> = OnceLock::new();
+	for pattern in interpolation_patterns {
+		for found in pattern.find_iter(value) {
+			matches.push(found.as_str().to_string());
+		}
+	}
 
-	INSTANCE.get_or_init(|| Regex::new(r"\{\{(.+?)\}\}").expect("valid interpolation regex"))
+	matches
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use j18n_core::Language;
 	use tempfile::TempDir;
 
+	fn handlebars() -> Vec<Regex> {
+		vec![Regex::new(r"\{\{(.+?)\}\}").unwrap()]
+	}
+
 	fn definition_in(dir: &TempDir, code: &str) -> I18nDefinition {
-		I18nDefinition::from_base_dir(dir.path(), Language::from_iso_639_code(code).unwrap())
+		I18nDefinition {
+			file: dir.path().join(format!("{code}.json")),
+			language: code.to_string(),
+		}
 	}
 
 	#[test]
 	fn validate_translation_passes_when_counts_match() {
-		let result = TranslationValidator::validate_translation(&["a".into()], &["A".into()]);
+		let result = TranslationValidator::validate_translation(&["a".into()], &["A".into()], &handlebars());
 
 		assert!(result.is_ok());
 	}
 
 	#[test]
 	fn validate_translation_errors_when_counts_differ() {
-		let err = TranslationValidator::validate_translation(&["a".into(), "b".into()], &["A".into()]).unwrap_err();
+		let err = TranslationValidator::validate_translation(
+			&["a".into(), "b".into()],
+			&["A".into()],
+			&handlebars(),
+		)
+		.unwrap_err();
 
 		assert!(matches!(err, J18nError::Validation(_)));
 	}
@@ -128,7 +147,7 @@ mod tests {
 			walked_tree_map: vec![],
 		};
 
-		let err = TranslationValidator::validate_data(&reference, &generated).unwrap_err();
+		let err = TranslationValidator::validate_data(&reference, &generated, &handlebars()).unwrap_err();
 
 		match err {
 			J18nError::MissingTranslation { key } => assert_eq!(key, "greeting"),
@@ -147,7 +166,7 @@ mod tests {
 			walked_tree_map: vec![("greeting".into(), "Olá".into())],
 		};
 
-		assert!(TranslationValidator::validate_data(&reference, &generated).is_ok());
+		assert!(TranslationValidator::validate_data(&reference, &generated, &handlebars()).is_ok());
 	}
 
 	#[test]
@@ -161,7 +180,7 @@ mod tests {
 			walked_tree_map: vec![("greeting".into(), "Olá".into())],
 		};
 
-		assert!(TranslationValidator::validate_data(&reference, &generated).is_ok());
+		assert!(TranslationValidator::validate_data(&reference, &generated, &handlebars()).is_ok());
 	}
 
 	#[tokio::test]
@@ -170,10 +189,12 @@ mod tests {
 		let reference = definition_in(&dir, "en");
 		let generated = definition_in(&dir, "pt");
 
-		tokio::fs::write(&reference.json_file_path, r#"{"a": "x"}"#).await.unwrap();
-		tokio::fs::write(&generated.json_file_path, r#"{"a": "y"}"#).await.unwrap();
+		tokio::fs::write(&reference.file, r#"{"a": "x"}"#).await.unwrap();
+		tokio::fs::write(&generated.file, r#"{"a": "y"}"#).await.unwrap();
 
-		TranslationValidator::validate_translations(&reference, &[generated]).await.unwrap();
+		TranslationValidator::validate_translations(&reference, &[generated], &[], &handlebars())
+			.await
+			.unwrap();
 	}
 
 	#[tokio::test]
@@ -182,12 +203,12 @@ mod tests {
 		let reference = definition_in(&dir, "en");
 		let generated = definition_in(&dir, "pt");
 
-		tokio::fs::write(&reference.json_file_path, r#"{"a": "x", "b": "y"}"#)
+		tokio::fs::write(&reference.file, r#"{"a": "x", "b": "y"}"#)
 			.await
 			.unwrap();
-		tokio::fs::write(&generated.json_file_path, r#"{"a": "z"}"#).await.unwrap();
+		tokio::fs::write(&generated.file, r#"{"a": "z"}"#).await.unwrap();
 
-		let err = TranslationValidator::validate_translations(&reference, &[generated])
+		let err = TranslationValidator::validate_translations(&reference, &[generated], &[], &handlebars())
 			.await
 			.unwrap_err();
 
@@ -197,15 +218,46 @@ mod tests {
 		}
 	}
 
+	#[tokio::test]
+	async fn validate_translations_skips_excluded_keys() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let generated = definition_in(&dir, "pt");
+
+		tokio::fs::write(&reference.file, r#"{"sample": "X", "real": "Y"}"#)
+			.await
+			.unwrap();
+		tokio::fs::write(&generated.file, r#"{"real": "Z"}"#).await.unwrap();
+
+		let exclude = vec![PathPattern::parse("sample").unwrap()];
+
+		TranslationValidator::validate_translations(&reference, &[generated], &exclude, &handlebars())
+			.await
+			.unwrap();
+	}
+
 	#[test]
 	fn find_interpolations_returns_each_match() {
-		let interpolations = find_interpolations("hello {{a}} and {{b}}!");
+		let interpolations = find_interpolations("hello {{a}} and {{b}}!", &handlebars());
 
 		assert_eq!(interpolations, vec!["{{a}}".to_string(), "{{b}}".to_string()]);
 	}
 
 	#[test]
 	fn find_interpolations_returns_empty_when_no_matches() {
-		assert!(find_interpolations("plain text").is_empty());
+		assert!(find_interpolations("plain text", &handlebars()).is_empty());
+	}
+
+	#[test]
+	fn find_interpolations_supports_multiple_patterns() {
+		let patterns = vec![
+			Regex::new(r"\{\{(.+?)\}\}").unwrap(),
+			Regex::new(r"%\w+%").unwrap(),
+		];
+
+		let interpolations = find_interpolations("Hi {{name}} %SITE%", &patterns);
+
+		assert!(interpolations.contains(&"{{name}}".to_string()));
+		assert!(interpolations.contains(&"%SITE%".to_string()));
 	}
 }

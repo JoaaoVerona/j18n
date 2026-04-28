@@ -4,18 +4,35 @@ mod config;
 use anyhow::{Context, Result};
 use args::{Cli, Command, CommandArgs, InitArgs};
 use clap::Parser;
-use config::{I18nToolConfig, TranslatorKind};
+use config::TranslatorKind;
+#[cfg(test)]
+use config::I18nToolConfig;
 use j18n_claude_code::ClaudeCodeBasedI18nTranslator;
-use j18n_core::{GenerationMode, I18nDefinition, Language};
+use j18n_core::{GenerationMode, I18nDefinition};
 use j18n_gemini_api::GeminiApiI18nTranslator;
-use j18n_generator::I18nGenerator;
+use j18n_generator::{I18nGenerator, J18nOptions};
 use j18n_translator::I18nTranslator;
 use j18n_validator::TranslationValidator;
 use std::path::{Path, PathBuf};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-const SKELETON_CONFIG: &str = "{\n\t\"baseDirectory\": \"\",\n\t\"referenceI18n\": \"en\",\n\t\"generateI18nFor\": [],\n\t\"translator\": \"claude-code\"\n}\n";
+const HASH_CACHE_FILE_NAME: &str = ".hash-cache.json";
+
+const SKELETON_CONFIG: &str = concat!(
+	"{\n",
+	"\t\"additionalPrompts\": [],\n",
+	"\t\"batchSize\": 50,\n",
+	"\t\"excludePatterns\": [],\n",
+	"\t\"generateI18nFor\": [\n",
+	"\t\t{ \"file\": \"locales/pt.json\", \"language\": \"Portuguese\" }\n",
+	"\t],\n",
+	"\t\"interpolationPatterns\": [],\n",
+	"\t\"parallelBatches\": 3,\n",
+	"\t\"referenceI18n\": { \"file\": \"locales/en.json\", \"language\": \"English\" },\n",
+	"\t\"translator\": \"claude-code\"\n",
+	"}\n",
+);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,53 +75,78 @@ async fn init(args: InitArgs) -> Result<()> {
 async fn run(args: CommandArgs, mode: GenerationMode) -> Result<()> {
 	for config_path in &args.configs {
 		let config = config::load_config(config_path)?;
-		let (reference_i18n, generated_i18ns) = build_definitions(config_path, &config)
+
+		config
+			.validate_numbers()
 			.with_context(|| format!("invalid config \"{}\"", config_path.display()))?;
+
+		let (exclude_patterns, interpolation_patterns) = config
+			.compile_patterns()
+			.with_context(|| format!("invalid config \"{}\"", config_path.display()))?;
+		let reference_i18n = resolve_definition(config_path, &config.reference_i18n);
+		let generated_i18ns: Vec<I18nDefinition> = config
+			.generate_i18n_for
+			.iter()
+			.map(|definition| resolve_definition(config_path, definition))
+			.collect();
+		let hash_cache_path = resolve_hash_cache_path(config_path, &config.hash_cache_location, &reference_i18n.file);
+		let options = J18nOptions {
+			batch_size: config.batch_size,
+			exclude_patterns,
+			hash_cache_path,
+			interpolation_patterns,
+			parallel_batches: config.parallel_batches,
+		};
 		let translator: Box<dyn I18nTranslator> = match config.translator {
-			TranslatorKind::ClaudeCode => Box::new(ClaudeCodeBasedI18nTranslator::new()),
-			TranslatorKind::GeminiApi => Box::new(GeminiApiI18nTranslator::new()?),
+			TranslatorKind::ClaudeCode => Box::new(ClaudeCodeBasedI18nTranslator::new(config.additional_prompts.clone())),
+			TranslatorKind::GeminiApi => Box::new(GeminiApiI18nTranslator::new(config.additional_prompts.clone())?),
 		};
 
-		I18nGenerator::execute(translator.as_ref(), &reference_i18n, &generated_i18ns, mode).await?;
-		TranslationValidator::validate_translations(&reference_i18n, &generated_i18ns).await?;
+		I18nGenerator::execute(translator.as_ref(), &reference_i18n, &generated_i18ns, mode, &options).await?;
+		TranslationValidator::validate_translations(
+			&reference_i18n,
+			&generated_i18ns,
+			&options.exclude_patterns,
+			&options.interpolation_patterns,
+		)
+		.await?;
 	}
 
 	Ok(())
 }
 
-fn build_definitions(config_path: &Path, config: &I18nToolConfig) -> Result<(I18nDefinition, Vec<I18nDefinition>)> {
-	let reference_language = Language::from_iso_639_code(&config.reference_i18n)
-		.with_context(|| format!("invalid referenceI18n \"{}\"", config.reference_i18n))?;
-	let base_dir = resolve_base_dir(config_path, &config.base_directory);
-	let reference_i18n = I18nDefinition::from_base_dir(&base_dir, reference_language);
-	let generated_i18ns = build_target_definitions(&base_dir, &config.generate_i18n_for)?;
-
-	Ok((reference_i18n, generated_i18ns))
+fn resolve_definition(config_path: &Path, definition: &I18nDefinition) -> I18nDefinition {
+	I18nDefinition {
+		file: resolve_relative(config_path, &definition.file),
+		language: definition.language.clone(),
+	}
 }
 
-fn resolve_base_dir(config_path: &Path, base_directory: &Path) -> PathBuf {
-	if base_directory.is_absolute() {
-		return base_directory.to_path_buf();
+fn resolve_hash_cache_path(
+	config_path: &Path,
+	hash_cache_location: &Option<PathBuf>,
+	reference_file: &Path,
+) -> PathBuf {
+	if let Some(custom) = hash_cache_location {
+		return resolve_relative(config_path, custom);
+	}
+
+	reference_file
+		.parent()
+		.map(|parent| parent.join(HASH_CACHE_FILE_NAME))
+		.unwrap_or_else(|| PathBuf::from(HASH_CACHE_FILE_NAME))
+}
+
+fn resolve_relative(config_path: &Path, file: &Path) -> PathBuf {
+	if file.is_absolute() {
+		return file.to_path_buf();
 	}
 
 	config_path
 		.parent()
 		.filter(|parent| !parent.as_os_str().is_empty())
-		.map(|parent| parent.join(base_directory))
-		.unwrap_or_else(|| base_directory.to_path_buf())
-}
-
-fn build_target_definitions(base_dir: &Path, codes: &[String]) -> Result<Vec<I18nDefinition>> {
-	let mut definitions = Vec::with_capacity(codes.len());
-
-	for code in codes {
-		let language =
-			Language::from_iso_639_code(code).with_context(|| format!("invalid generateI18nFor entry \"{code}\""))?;
-
-		definitions.push(I18nDefinition::from_base_dir(base_dir, language));
-	}
-
-	Ok(definitions)
+		.map(|parent| parent.join(file))
+		.unwrap_or_else(|| file.to_path_buf())
 }
 
 fn init_logging() {
@@ -141,57 +183,95 @@ mod tests {
 	fn skeleton_config_parses_back_into_defaults() {
 		let parsed: I18nToolConfig = serde_json::from_str(SKELETON_CONFIG).unwrap();
 
-		assert_eq!(parsed.reference_i18n, "en");
-		assert!(parsed.generate_i18n_for.is_empty());
+		assert_eq!(parsed.reference_i18n.language, "English");
+		assert_eq!(parsed.reference_i18n.file, PathBuf::from("locales/en.json"));
+		assert_eq!(parsed.generate_i18n_for.len(), 1);
+		assert_eq!(parsed.generate_i18n_for[0].language, "Portuguese");
+		assert_eq!(parsed.generate_i18n_for[0].file, PathBuf::from("locales/pt.json"));
 		assert!(matches!(parsed.translator, TranslatorKind::ClaudeCode));
-		assert_eq!(parsed.base_directory, PathBuf::from(""));
+		assert_eq!(parsed.batch_size, 50);
+		assert_eq!(parsed.parallel_batches, 3);
+		assert!(parsed.exclude_patterns.is_empty());
+		assert!(parsed.interpolation_patterns.is_empty());
+		assert!(parsed.additional_prompts.is_empty());
+		assert!(parsed.hash_cache_location.is_none());
 	}
 
 	#[test]
-	fn resolve_base_dir_returns_absolute_path_unchanged() {
-		let absolute = absolute_path(&["abs", "locales"]);
+	fn skeleton_config_compiles_and_validates() {
+		let parsed: I18nToolConfig = serde_json::from_str(SKELETON_CONFIG).unwrap();
 
-		assert_eq!(
-			resolve_base_dir(Path::new("/some/config.json"), &absolute),
-			absolute
+		assert!(parsed.validate_numbers().is_ok());
+		assert!(parsed.compile_patterns().is_ok());
+	}
+
+	#[test]
+	fn resolve_relative_returns_absolute_path_unchanged() {
+		let absolute = absolute_path(&["abs", "locales", "en.json"]);
+
+		assert_eq!(resolve_relative(Path::new("/some/config.json"), &absolute), absolute);
+	}
+
+	#[test]
+	fn resolve_relative_joins_relative_path_to_config_parent() {
+		let resolved = resolve_relative(Path::new("/configs/api.json"), Path::new("../locales/en.json"));
+
+		assert_eq!(resolved, PathBuf::from("/configs").join("../locales/en.json"));
+	}
+
+	#[test]
+	fn resolve_relative_falls_back_to_relative_when_config_has_no_parent() {
+		let resolved = resolve_relative(Path::new("api.json"), Path::new("locales/en.json"));
+
+		assert_eq!(resolved, PathBuf::from("locales/en.json"));
+	}
+
+	#[test]
+	fn resolve_definition_resolves_file_and_keeps_language() {
+		let resolved = resolve_definition(
+			Path::new("/configs/api.json"),
+			&I18nDefinition {
+				file: PathBuf::from("locales/pt.json"),
+				language: "Brazilian Portuguese".to_string(),
+			},
 		);
+
+		assert_eq!(resolved.file, PathBuf::from("/configs").join("locales/pt.json"));
+		assert_eq!(resolved.language, "Brazilian Portuguese");
 	}
 
 	#[test]
-	fn resolve_base_dir_joins_relative_path_to_config_parent() {
-		let resolved = resolve_base_dir(Path::new("/configs/api.json"), Path::new("../locales"));
+	fn resolve_hash_cache_path_uses_explicit_value_when_present() {
+		let resolved = resolve_hash_cache_path(
+			Path::new("/configs/api.json"),
+			&Some(PathBuf::from(".cache.json")),
+			Path::new("/configs/locales/en.json"),
+		);
 
-		assert_eq!(resolved, PathBuf::from("/configs").join("../locales"));
+		assert_eq!(resolved, PathBuf::from("/configs").join(".cache.json"));
 	}
 
 	#[test]
-	fn resolve_base_dir_falls_back_to_relative_when_config_has_no_parent() {
-		let resolved = resolve_base_dir(Path::new("api.json"), Path::new("locales"));
+	fn resolve_hash_cache_path_uses_explicit_absolute_value_unchanged() {
+		let absolute = absolute_path(&["caches", "j18n.json"]);
+		let resolved = resolve_hash_cache_path(
+			Path::new("/configs/api.json"),
+			&Some(absolute.clone()),
+			Path::new("/configs/locales/en.json"),
+		);
 
-		assert_eq!(resolved, PathBuf::from("locales"));
+		assert_eq!(resolved, absolute);
 	}
 
 	#[test]
-	fn build_target_definitions_returns_one_definition_per_code() {
-		let base = PathBuf::from("/locales");
-		let codes = vec!["pt".to_string(), "es".to_string()];
-		let definitions = build_target_definitions(&base, &codes).unwrap();
+	fn resolve_hash_cache_path_defaults_to_reference_directory() {
+		let resolved = resolve_hash_cache_path(
+			Path::new("/configs/api.json"),
+			&None,
+			Path::new("/anywhere/locales/en.json"),
+		);
 
-		assert_eq!(definitions.len(), 2);
-		assert_eq!(definitions[0].language.iso_639_code(), "pt");
-		assert_eq!(definitions[0].json_file_path, PathBuf::from("/locales/pt.json"));
-		assert_eq!(definitions[1].language.iso_639_code(), "es");
-	}
-
-	#[test]
-	fn build_target_definitions_errors_on_unknown_code() {
-		let base = PathBuf::from("/locales");
-		let codes = vec!["pt".to_string(), "xx".to_string()];
-
-		let err = build_target_definitions(&base, &codes).unwrap_err();
-		let text = format!("{err:#}");
-
-		assert!(text.contains("xx"));
+		assert_eq!(resolved, PathBuf::from("/anywhere/locales/.hash-cache.json"));
 	}
 
 	#[tokio::test]
@@ -231,23 +311,5 @@ mod tests {
 
 		assert!(text.contains("refusing to overwrite"));
 		assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "preexisting");
-	}
-
-	#[test]
-	fn build_definitions_uses_resolved_base_dir() {
-		let dir = TempDir::new().unwrap();
-		let config_path = dir.path().join("nested").join("config.json");
-		let config = I18nToolConfig {
-			base_directory: PathBuf::from("../locales"),
-			generate_i18n_for: vec!["pt".to_string()],
-			reference_i18n: "en".to_string(),
-			translator: TranslatorKind::ClaudeCode,
-		};
-
-		let (reference, generated) = build_definitions(&config_path, &config).unwrap();
-
-		assert!(reference.json_file_path.ends_with("locales/en.json") || reference.json_file_path.ends_with("locales\\en.json"));
-		assert_eq!(generated.len(), 1);
-		assert_eq!(generated[0].language.iso_639_code(), "pt");
 	}
 }
