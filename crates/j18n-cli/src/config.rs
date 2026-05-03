@@ -99,14 +99,98 @@ pub struct I18nToolConfig {
 	#[serde(rename = "referenceI18n")]
 	pub reference_i18n: DefinitionEntry,
 
-	pub translator: TranslatorKind,
+	pub translator: TranslatorSelection,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum TranslatorKind {
-	ClaudeCode,
-	GeminiApi,
+pub const CLAUDE_CODE_DEFAULT_MODEL: &str = "opus";
+pub const CLAUDE_CODE_DEFAULT_EFFORT: &str = "high";
+pub const GEMINI_DEFAULT_MODEL: &str = "gemini-3.1-pro-preview";
+pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.1";
+pub const CODEX_DEFAULT_EFFORT: &str = "high";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TranslatorSelection {
+	ClaudeCode { model: String, effort: String },
+	GeminiApi { model: String },
+	Codex { model: String, effort: String },
+}
+
+impl TranslatorSelection {
+	pub fn parse(value: &str) -> Result<Self, String> {
+		let parts: Vec<&str> = value.split('/').collect();
+		let kind = parts[0];
+		let extra = &parts[1..];
+
+		match kind {
+			"claude-code" => match extra.len() {
+				0 => Ok(TranslatorSelection::ClaudeCode {
+					model: CLAUDE_CODE_DEFAULT_MODEL.into(),
+					effort: CLAUDE_CODE_DEFAULT_EFFORT.into(),
+				}),
+				1 => Ok(TranslatorSelection::ClaudeCode {
+					model: extra[0].into(),
+					effort: CLAUDE_CODE_DEFAULT_EFFORT.into(),
+				}),
+				2 => Ok(TranslatorSelection::ClaudeCode {
+					model: extra[0].into(),
+					effort: extra[1].into(),
+				}),
+				_ => Err(format!(
+					"too many segments in translator \"{value}\"; expected at most \"claude-code/<model>/<effort>\""
+				)),
+			},
+			"gemini-api" => match extra.len() {
+				0 => Ok(TranslatorSelection::GeminiApi {
+					model: GEMINI_DEFAULT_MODEL.into(),
+				}),
+				1 => Ok(TranslatorSelection::GeminiApi {
+					model: normalize_gemini_model(extra[0]),
+				}),
+				_ => Err(format!(
+					"too many segments in translator \"{value}\"; expected at most \"gemini-api/<model>\""
+				)),
+			},
+			"codex" => match extra.len() {
+				0 => Ok(TranslatorSelection::Codex {
+					model: CODEX_DEFAULT_MODEL.into(),
+					effort: CODEX_DEFAULT_EFFORT.into(),
+				}),
+				1 => Ok(TranslatorSelection::Codex {
+					model: extra[0].into(),
+					effort: CODEX_DEFAULT_EFFORT.into(),
+				}),
+				2 => Ok(TranslatorSelection::Codex {
+					model: extra[0].into(),
+					effort: extra[1].into(),
+				}),
+				_ => Err(format!(
+					"too many segments in translator \"{value}\"; expected at most \"codex/<model>/<effort>\""
+				)),
+			},
+			other => Err(format!(
+				"unknown translator kind \"{other}\"; expected one of \"claude-code\", \"gemini-api\", or \"codex\""
+			)),
+		}
+	}
+}
+
+fn normalize_gemini_model(value: &str) -> String {
+	if value.starts_with("gemini-") {
+		value.to_string()
+	} else {
+		format!("gemini-{value}")
+	}
+}
+
+impl<'de> Deserialize<'de> for TranslatorSelection {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		let raw = String::deserialize(deserializer)?;
+
+		TranslatorSelection::parse(&raw).map_err(de::Error::custom)
+	}
 }
 
 impl I18nToolConfig {
@@ -188,7 +272,11 @@ mod tests {
 		assert_eq!(config.generate_i18n_for.len(), 2);
 		assert_eq!(config.generate_i18n_for[0].file, "locales/pt.json");
 		assert_eq!(config.generate_i18n_for[0].language, "Brazilian Portuguese");
-		assert!(matches!(config.translator, TranslatorKind::ClaudeCode));
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::ClaudeCode { ref model, ref effort }
+				if model == CLAUDE_CODE_DEFAULT_MODEL && effort == CLAUDE_CODE_DEFAULT_EFFORT
+		));
 		assert!(config.hash_cache_location.is_none());
 	}
 
@@ -213,7 +301,10 @@ mod tests {
 
 		let config = load_config(&path).unwrap();
 
-		assert_eq!(config.hash_cache_location, Some(PathBuf::from("custom/.j18n-cache.ini")));
+		assert_eq!(
+			config.hash_cache_location,
+			Some(PathBuf::from("custom/.j18n-cache.ini"))
+		);
 	}
 
 	#[test]
@@ -339,7 +430,170 @@ mod tests {
 
 		let config = load_config(&path).unwrap();
 
-		assert!(matches!(config.translator, TranslatorKind::GeminiApi));
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::GeminiApi { ref model } if model == GEMINI_DEFAULT_MODEL
+		));
+	}
+
+	#[test]
+	fn parses_gemini_translator_with_explicit_model() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "gemini-api/3.1-pro"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::GeminiApi { ref model } if model == "gemini-3.1-pro"
+		));
+	}
+
+	#[test]
+	fn parses_gemini_translator_with_full_model_name_unchanged() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "gemini-api/gemini-3.1-pro-preview"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::GeminiApi { ref model } if model == "gemini-3.1-pro-preview"
+		));
+	}
+
+	#[test]
+	fn parses_claude_code_with_model_and_effort() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code/sonnet/medium"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::ClaudeCode { ref model, ref effort }
+				if model == "sonnet" && effort == "medium"
+		));
+	}
+
+	#[test]
+	fn parses_claude_code_with_model_only_defaults_effort_to_high() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code/opus"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::ClaudeCode { ref model, ref effort }
+				if model == "opus" && effort == CLAUDE_CODE_DEFAULT_EFFORT
+		));
+	}
+
+	#[test]
+	fn parses_codex_translator_with_model_and_effort() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "codex/gpt-5.1/low"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::Codex { ref model, ref effort }
+				if model == "gpt-5.1" && effort == "low"
+		));
+	}
+
+	#[test]
+	fn parses_codex_translator_with_only_kind_uses_defaults() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "codex"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert!(matches!(
+			config.translator,
+			TranslatorSelection::Codex { ref model, ref effort }
+				if model == CODEX_DEFAULT_MODEL && effort == CODEX_DEFAULT_EFFORT
+		));
 	}
 
 	#[test]
@@ -363,7 +617,54 @@ mod tests {
 		let err = load_config(&path).unwrap_err();
 		let text = format!("{err:#}");
 
-		assert!(text.contains("claude-code") && text.contains("gemini-api"));
+		assert!(text.contains("claude-code") && text.contains("gemini-api") && text.contains("codex"));
+	}
+
+	#[test]
+	fn rejects_too_many_segments_in_translator_value() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code/opus/high/extra"
+			}"#,
+		);
+
+		let err = load_config(&path).unwrap_err();
+		let text = format!("{err:#}");
+
+		assert!(text.contains("too many segments"));
+	}
+
+	#[test]
+	fn rejects_too_many_segments_in_gemini_translator_value() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "gemini-api/3.1-pro/high"
+			}"#,
+		);
+
+		let err = load_config(&path).unwrap_err();
+
+		assert!(format!("{err:#}").contains("too many segments"));
 	}
 
 	#[test]
@@ -448,7 +749,10 @@ mod tests {
 
 		match config.namespaces {
 			Some(NamespacesConfig::List(names)) => {
-				assert_eq!(names, vec!["common".to_string(), "auth".to_string(), "checkout".to_string()]);
+				assert_eq!(
+					names,
+					vec!["common".to_string(), "auth".to_string(), "checkout".to_string()]
+				);
 			}
 			other => panic!("expected explicit list, got {other:?}"),
 		}

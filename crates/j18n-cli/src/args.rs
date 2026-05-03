@@ -1,6 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+pub const DEFAULT_CONFIG_FILE: &str = "j18n.json";
+
 #[derive(Debug, Parser)]
 #[command(
 	name = "j18n",
@@ -37,23 +39,47 @@ pub enum Command {
 
 	#[command(
 		name = "install-git-hook",
-		about = "Install a `pre-commit` hook in the current repo that runs `j18n check <CONFIGS>...`."
+		about = "Install a `pre-commit` hook in the current repo that runs `j18n check` against the configured files."
 	)]
 	InstallGitHook(CommandArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct InitArgs {
-	#[arg(help = "Path where the skeleton config file will be written.")]
-	pub path: PathBuf,
+	#[arg(
+		short = 'f',
+		long = "file",
+		value_name = "PATH",
+		help = "Path where the skeleton config file will be written. Defaults to \"j18n.json\" in the current directory when omitted."
+	)]
+	pub path: Option<PathBuf>,
 }
 
-#[derive(Args, Debug)]
+impl InitArgs {
+	pub fn resolved_path(&self) -> PathBuf {
+		self.path
+			.clone()
+			.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE))
+	}
+}
+
+#[derive(Args, Debug, Default)]
 pub struct CommandArgs {
 	#[arg(
-		help = "One or more JSON configuration files describing what to translate.",
-		num_args = 1..,
-		required = true
+		short = 'f',
+		long = "file",
+		value_name = "PATH",
+		help = "Path to a JSON configuration file. May be repeated to act on multiple configs. Defaults to \"j18n.json\" in the current directory when omitted."
 	)]
 	pub configs: Vec<PathBuf>,
+}
+
+impl CommandArgs {
+	pub fn resolved_configs(&self) -> Vec<PathBuf> {
+		if self.configs.is_empty() {
+			vec![PathBuf::from(DEFAULT_CONFIG_FILE)]
+		} else {
+			self.configs.clone()
+		}
+	}
 }

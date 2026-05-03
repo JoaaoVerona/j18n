@@ -5,8 +5,9 @@ mod expand;
 use anyhow::{Context, Result};
 use args::{Cli, Command, CommandArgs, InitArgs};
 use clap::Parser;
-use config::{I18nToolConfig, NamespacesConfig, TranslatorKind};
+use config::{I18nToolConfig, NamespacesConfig, TranslatorSelection};
 use j18n_claude_code::ClaudeCodeBasedI18nTranslator;
+use j18n_codex::CodexCliBasedI18nTranslator;
 use j18n_core::{GenerationMode, I18nDefinition};
 use j18n_gemini_api::GeminiApiI18nTranslator;
 use j18n_generator::{I18nGenerator, J18nOptions};
@@ -50,14 +51,16 @@ async fn main() -> Result<()> {
 }
 
 async fn init(args: InitArgs) -> Result<()> {
-	if tokio::fs::try_exists(&args.path)
+	let path = args.resolved_path();
+
+	if tokio::fs::try_exists(&path)
 		.await
-		.with_context(|| format!("failed to stat \"{}\"", args.path.display()))?
+		.with_context(|| format!("failed to stat \"{}\"", path.display()))?
 	{
-		anyhow::bail!("refusing to overwrite existing file at \"{}\"", args.path.display());
+		anyhow::bail!("refusing to overwrite existing file at \"{}\"", path.display());
 	}
 
-	if let Some(parent) = args.path.parent() {
+	if let Some(parent) = path.parent() {
 		if !parent.as_os_str().is_empty() {
 			tokio::fs::create_dir_all(parent)
 				.await
@@ -65,11 +68,11 @@ async fn init(args: InitArgs) -> Result<()> {
 		}
 	}
 
-	tokio::fs::write(&args.path, SKELETON_CONFIG)
+	tokio::fs::write(&path, SKELETON_CONFIG)
 		.await
-		.with_context(|| format!("failed to write \"{}\"", args.path.display()))?;
+		.with_context(|| format!("failed to write \"{}\"", path.display()))?;
 
-	info!("Created skeleton config at \"{}\"", args.path.display());
+	info!("Created skeleton config at \"{}\"", path.display());
 
 	Ok(())
 }
@@ -130,7 +133,11 @@ async fn build_runs(
 	match &config.namespaces {
 		None => Ok(vec![ResolvedRun {
 			namespace: None,
-			reference_i18n: build_definition(config_path, &config.reference_i18n.file, &config.reference_i18n.language),
+			reference_i18n: build_definition(
+				config_path,
+				&config.reference_i18n.file,
+				&config.reference_i18n.language,
+			),
 			generated_i18ns: config
 				.generate_i18n_for
 				.iter()
@@ -189,15 +196,25 @@ fn build_namespaced_runs(
 }
 
 async fn run(args: CommandArgs, mode: GenerationMode) -> Result<()> {
-	for config_path in &args.configs {
+	for config_path in &args.resolved_configs() {
 		let resolved = resolve_config(config_path).await?;
-		let translator: Box<dyn I18nTranslator> = match resolved.config.translator {
-			TranslatorKind::ClaudeCode => Box::new(ClaudeCodeBasedI18nTranslator::new(
+		let translator: Box<dyn I18nTranslator> = match &resolved.config.translator {
+			TranslatorSelection::ClaudeCode { model, effort } => {
+				Box::new(ClaudeCodeBasedI18nTranslator::with_settings(
+					resolved.config.additional_prompts.clone(),
+					model.clone(),
+					effort.clone(),
+				))
+			}
+			TranslatorSelection::GeminiApi { model } => Box::new(GeminiApiI18nTranslator::with_settings(
 				resolved.config.additional_prompts.clone(),
-			)),
-			TranslatorKind::GeminiApi => Box::new(GeminiApiI18nTranslator::new(
-				resolved.config.additional_prompts.clone(),
+				model.clone(),
 			)?),
+			TranslatorSelection::Codex { model, effort } => Box::new(CodexCliBasedI18nTranslator::with_settings(
+				resolved.config.additional_prompts.clone(),
+				model.clone(),
+				effort.clone(),
+			)),
 		};
 
 		for resolved_run in &resolved.runs {
@@ -231,7 +248,7 @@ async fn check(args: CommandArgs) -> Result<()> {
 	let mut total_files: usize = 0;
 	let mut total_entries: usize = 0;
 
-	for config_path in &args.configs {
+	for config_path in &args.resolved_configs() {
 		let resolved = resolve_config(config_path).await?;
 
 		for resolved_run in &resolved.runs {
@@ -280,7 +297,7 @@ async fn check(args: CommandArgs) -> Result<()> {
 async fn baseline(args: CommandArgs) -> Result<()> {
 	let mut total_targets: usize = 0;
 
-	for config_path in &args.configs {
+	for config_path in &args.resolved_configs() {
 		let resolved = resolve_config(config_path).await?;
 
 		for resolved_run in &resolved.runs {
@@ -312,7 +329,7 @@ async fn baseline(args: CommandArgs) -> Result<()> {
 async fn install_git_hook(args: CommandArgs) -> Result<()> {
 	let cwd = std::env::current_dir().context("failed to read current directory")?;
 
-	install_git_hook_at(&cwd, &args.configs).await
+	install_git_hook_at(&cwd, &args.resolved_configs()).await
 }
 
 async fn install_git_hook_at(repo_root: &Path, configs: &[PathBuf]) -> Result<()> {
@@ -426,7 +443,7 @@ fn build_check_line(configs: &[PathBuf]) -> String {
 	for config in configs {
 		let normalized = config.to_string_lossy().replace('\\', "/");
 
-		line.push(' ');
+		line.push_str(" -f ");
 		line.push_str(&shell_single_quote(&normalized));
 	}
 
@@ -514,7 +531,11 @@ mod tests {
 		assert_eq!(parsed.generate_i18n_for.len(), 1);
 		assert_eq!(parsed.generate_i18n_for[0].language, "Portuguese");
 		assert_eq!(parsed.generate_i18n_for[0].file, "locales/pt.json");
-		assert!(matches!(parsed.translator, TranslatorKind::ClaudeCode));
+		assert!(matches!(
+			parsed.translator,
+			TranslatorSelection::ClaudeCode { ref model, ref effort }
+				if model == "opus" && effort == "high"
+		));
 		assert_eq!(parsed.batch_size, 50);
 		assert_eq!(parsed.parallel_batches, 3);
 		assert!(parsed.exclude_patterns.is_empty());
@@ -554,7 +575,11 @@ mod tests {
 
 	#[test]
 	fn build_definition_resolves_file_and_keeps_id_and_language() {
-		let resolved = build_definition(Path::new("/configs/api.json"), "locales/pt.json", "Brazilian Portuguese");
+		let resolved = build_definition(
+			Path::new("/configs/api.json"),
+			"locales/pt.json",
+			"Brazilian Portuguese",
+		);
 
 		assert_eq!(resolved.file, PathBuf::from("/configs").join("locales/pt.json"));
 		assert_eq!(resolved.id, "locales/pt.json");
@@ -601,7 +626,11 @@ mod tests {
 		let path = dir.path().join("config.json");
 		let original_cwd = env::current_dir().unwrap();
 
-		init(InitArgs { path: path.clone() }).await.unwrap();
+		init(InitArgs {
+			path: Some(path.clone()),
+		})
+		.await
+		.unwrap();
 
 		assert!(path.exists());
 		let written = tokio::fs::read_to_string(&path).await.unwrap();
@@ -615,7 +644,11 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let path = dir.path().join("nested").join("dirs").join("config.json");
 
-		init(InitArgs { path: path.clone() }).await.unwrap();
+		init(InitArgs {
+			path: Some(path.clone()),
+		})
+		.await
+		.unwrap();
 
 		assert!(path.exists());
 	}
@@ -627,7 +660,11 @@ mod tests {
 
 		tokio::fs::write(&path, "preexisting").await.unwrap();
 
-		let err = init(InitArgs { path: path.clone() }).await.unwrap_err();
+		let err = init(InitArgs {
+			path: Some(path.clone()),
+		})
+		.await
+		.unwrap_err();
 		let text = format!("{err:#}");
 
 		assert!(text.contains("refusing to overwrite"));
@@ -736,24 +773,155 @@ mod tests {
 	}
 
 	#[test]
+	fn init_args_resolved_path_returns_default_when_path_omitted() {
+		let args = InitArgs::default();
+
+		assert_eq!(args.resolved_path(), PathBuf::from("j18n.json"));
+	}
+
+	#[test]
+	fn init_args_resolved_path_returns_provided_path_when_present() {
+		let args = InitArgs {
+			path: Some(PathBuf::from("custom/config.json")),
+		};
+
+		assert_eq!(args.resolved_path(), PathBuf::from("custom/config.json"));
+	}
+
+	#[test]
+	fn init_command_parses_with_no_arguments() {
+		let cli = Cli::try_parse_from(["j18n", "init"]).unwrap();
+
+		match cli.command {
+			Command::Init(args) => {
+				assert!(args.path.is_none());
+				assert_eq!(args.resolved_path(), PathBuf::from("j18n.json"));
+			}
+			other => panic!("expected Init, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn init_command_parses_with_short_file_flag() {
+		let cli = Cli::try_parse_from(["j18n", "init", "-f", "custom.json"]).unwrap();
+
+		match cli.command {
+			Command::Init(args) => {
+				assert_eq!(args.path, Some(PathBuf::from("custom.json")));
+			}
+			other => panic!("expected Init, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn init_command_rejects_positional_path_argument() {
+		// Bare positional path is no longer accepted; the user must use -f / --file.
+		let result = Cli::try_parse_from(["j18n", "init", "j18n.json"]);
+
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn init_writes_skeleton_to_default_path_when_omitted() {
+		let dir = TempDir::new().unwrap();
+		let original_cwd = env::current_dir().unwrap();
+
+		env::set_current_dir(dir.path()).unwrap();
+
+		init(InitArgs::default()).await.unwrap();
+
+		let default_path = dir.path().join("j18n.json");
+		assert!(default_path.exists());
+		let written = tokio::fs::read_to_string(&default_path).await.unwrap();
+		assert_eq!(written, SKELETON_CONFIG);
+
+		env::set_current_dir(original_cwd).unwrap();
+	}
+
+	#[test]
+	fn resolved_configs_returns_default_when_no_files_provided() {
+		let args = CommandArgs::default();
+
+		assert_eq!(args.resolved_configs(), vec![PathBuf::from("j18n.json")]);
+	}
+
+	#[test]
+	fn resolved_configs_returns_provided_files_when_present() {
+		let args = CommandArgs {
+			configs: vec![PathBuf::from("a.json"), PathBuf::from("b.json")],
+		};
+
+		assert_eq!(
+			args.resolved_configs(),
+			vec![PathBuf::from("a.json"), PathBuf::from("b.json")]
+		);
+	}
+
+	#[test]
+	fn check_command_parses_with_no_arguments() {
+		let cli = Cli::try_parse_from(["j18n", "check"]).unwrap();
+
+		match cli.command {
+			Command::Check(args) => {
+				assert!(args.configs.is_empty());
+				assert_eq!(args.resolved_configs(), vec![PathBuf::from("j18n.json")]);
+			}
+			other => panic!("expected Check, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn check_command_parses_with_single_short_file_flag() {
+		let cli = Cli::try_parse_from(["j18n", "check", "-f", "custom.json"]).unwrap();
+
+		match cli.command {
+			Command::Check(args) => {
+				assert_eq!(args.configs, vec![PathBuf::from("custom.json")]);
+				assert_eq!(args.resolved_configs(), vec![PathBuf::from("custom.json")]);
+			}
+			other => panic!("expected Check, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn check_command_parses_with_repeated_long_file_flag() {
+		let cli = Cli::try_parse_from(["j18n", "check", "--file", "a.json", "--file", "b.json"]).unwrap();
+
+		match cli.command {
+			Command::Check(args) => {
+				assert_eq!(args.configs, vec![PathBuf::from("a.json"), PathBuf::from("b.json")]);
+			}
+			other => panic!("expected Check, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn check_command_rejects_positional_config_argument() {
+		// Bare positional configs are no longer accepted; the user must use -f / --file.
+		let result = Cli::try_parse_from(["j18n", "check", "j18n.json"]);
+
+		assert!(result.is_err());
+	}
+
+	#[test]
 	fn build_check_line_quotes_each_config_path() {
 		let line = build_check_line(&[PathBuf::from("locales/app.json"), PathBuf::from("locales/web.json")]);
 
-		assert_eq!(line, "j18n check 'locales/app.json' 'locales/web.json'");
+		assert_eq!(line, "j18n check -f 'locales/app.json' -f 'locales/web.json'");
 	}
 
 	#[test]
 	fn build_check_line_normalizes_windows_separators() {
 		let line = build_check_line(&[PathBuf::from(r"locales\nested\app.json")]);
 
-		assert_eq!(line, "j18n check 'locales/nested/app.json'");
+		assert_eq!(line, "j18n check -f 'locales/nested/app.json'");
 	}
 
 	#[test]
 	fn build_initial_script_includes_shebang_and_set_e() {
-		let script = build_initial_script("j18n check 'a.json'");
+		let script = build_initial_script("j18n check -f 'a.json'");
 
-		assert_eq!(script, "#!/bin/sh\nset -e\nj18n check 'a.json'\n");
+		assert_eq!(script, "#!/bin/sh\nset -e\nj18n check -f 'a.json'\n");
 	}
 
 	#[test]
@@ -823,7 +991,7 @@ mod tests {
 		let hook_path = dir.path().join(".git").join("hooks").join("pre-commit");
 		let content = tokio::fs::read_to_string(&hook_path).await.unwrap();
 
-		assert_eq!(content, "#!/bin/sh\nset -e\nj18n check 'locales/app.json'\n");
+		assert_eq!(content, "#!/bin/sh\nset -e\nj18n check -f 'locales/app.json'\n");
 
 		#[cfg(unix)]
 		{
@@ -862,7 +1030,7 @@ mod tests {
 
 		let content = tokio::fs::read_to_string(hooks_dir.join("pre-commit")).await.unwrap();
 
-		assert_eq!(content, "#!/bin/sh\nnpm test\nj18n check 'a.json'\n");
+		assert_eq!(content, "#!/bin/sh\nnpm test\nj18n check -f 'a.json'\n");
 	}
 
 	#[tokio::test]
@@ -882,7 +1050,10 @@ mod tests {
 			.await
 			.unwrap();
 
-		assert_eq!(content, "#!/bin/sh\nset -e\nj18n check 'a.json'\nj18n check 'b.json'\n");
+		assert_eq!(
+			content,
+			"#!/bin/sh\nset -e\nj18n check -f 'a.json'\nj18n check -f 'b.json'\n"
+		);
 	}
 
 	#[tokio::test]
@@ -902,7 +1073,7 @@ mod tests {
 			.await
 			.unwrap();
 
-		assert_eq!(content, "#!/bin/sh\nset -e\nj18n check 'a.json'\n");
+		assert_eq!(content, "#!/bin/sh\nset -e\nj18n check -f 'a.json'\n");
 	}
 
 	#[tokio::test]
@@ -919,7 +1090,7 @@ mod tests {
 
 		let content = tokio::fs::read_to_string(hooks_dir.join("pre-commit")).await.unwrap();
 
-		assert_eq!(content, "#!/bin/sh\nnpm test\nj18n check 'a.json'\n");
+		assert_eq!(content, "#!/bin/sh\nnpm test\nj18n check -f 'a.json'\n");
 	}
 
 	#[tokio::test]
@@ -1127,7 +1298,11 @@ mod tests {
 		std::fs::write(dir.path().join("en.json"), r#"{"a": "A", "b": "B"}"#).unwrap();
 		std::fs::write(dir.path().join("pt.json"), r#"{"a": "AA", "b": "BB"}"#).unwrap();
 
-		baseline(CommandArgs { configs: vec![config.clone()] }).await.unwrap();
+		baseline(CommandArgs {
+			configs: vec![config.clone()],
+		})
+		.await
+		.unwrap();
 		check(CommandArgs { configs: vec![config] }).await.unwrap();
 	}
 
@@ -1140,7 +1315,11 @@ mod tests {
 		std::fs::write(dir.path().join("pt.json"), r#"{"a": "AA"}"#).unwrap();
 		write_matching_hash_cache(&dir, "pt", &[("a", "A-OLD")]).await;
 
-		baseline(CommandArgs { configs: vec![config.clone()] }).await.unwrap();
+		baseline(CommandArgs {
+			configs: vec![config.clone()],
+		})
+		.await
+		.unwrap();
 		check(CommandArgs { configs: vec![config] }).await.unwrap();
 	}
 
@@ -1164,7 +1343,11 @@ mod tests {
 			r#"["common", "auth"]"#,
 		);
 
-		baseline(CommandArgs { configs: vec![config.clone()] }).await.unwrap();
+		baseline(CommandArgs {
+			configs: vec![config.clone()],
+		})
+		.await
+		.unwrap();
 		check(CommandArgs { configs: vec![config] }).await.unwrap();
 	}
 

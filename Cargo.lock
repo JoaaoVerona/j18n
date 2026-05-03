@@ -608,6 +608,7 @@ dependencies = [
  "anyhow",
  "clap",
  "j18n-claude-code",
+ "j18n-codex",
  "j18n-core",
  "j18n-gemini-api",
  "j18n-generator",
@@ -621,6 +622,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "j18n-codex"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "j18n-core",
+ "j18n-translator",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

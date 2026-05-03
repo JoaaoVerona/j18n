@@ -8,36 +8,40 @@ use tokio::process::Command;
 const ENTRY_SEPARATOR: &str = "<<<SEP>>>";
 
 #[async_trait]
-pub trait ClaudeCodeExecutor: Send + Sync {
+pub trait CodexExecutor: Send + Sync {
 	async fn execute(&self, prompt: &str) -> J18nResult<String>;
 }
 
-pub struct DefaultClaudeCodeExecutor {
+pub struct DefaultCodexExecutor {
 	model: String,
+	effort: String,
 }
 
-impl DefaultClaudeCodeExecutor {
-	pub fn new(model: impl Into<String>) -> Self {
-		Self { model: model.into() }
+impl DefaultCodexExecutor {
+	pub fn new(model: impl Into<String>, effort: impl Into<String>) -> Self {
+		Self {
+			model: model.into(),
+			effort: effort.into(),
+		}
 	}
 }
 
 #[async_trait]
-impl ClaudeCodeExecutor for DefaultClaudeCodeExecutor {
+impl CodexExecutor for DefaultCodexExecutor {
 	async fn execute(&self, prompt: &str) -> J18nResult<String> {
-		execute_claude_code(&self.model, prompt).await
+		execute_codex(&self.model, &self.effort, prompt).await
 	}
 }
 
-pub struct ClaudeCodeBasedI18nTranslator<E: ClaudeCodeExecutor = DefaultClaudeCodeExecutor> {
+pub struct CodexCliBasedI18nTranslator<E: CodexExecutor = DefaultCodexExecutor> {
 	additional_prompts: Vec<String>,
 	effort: String,
 	executor: E,
 }
 
-impl ClaudeCodeBasedI18nTranslator<DefaultClaudeCodeExecutor> {
-	pub const TRANSLATOR_ID: &'static str = "claude-code";
-	pub const DEFAULT_MODEL: &'static str = "opus";
+impl CodexCliBasedI18nTranslator<DefaultCodexExecutor> {
+	pub const TRANSLATOR_ID: &'static str = "codex";
+	pub const DEFAULT_MODEL: &'static str = "gpt-5.1";
 	pub const DEFAULT_EFFORT: &'static str = "high";
 
 	pub fn new(additional_prompts: Vec<String>) -> Self {
@@ -45,19 +49,21 @@ impl ClaudeCodeBasedI18nTranslator<DefaultClaudeCodeExecutor> {
 	}
 
 	pub fn with_settings(additional_prompts: Vec<String>, model: impl Into<String>, effort: impl Into<String>) -> Self {
+		let effort = effort.into();
+
 		Self {
 			additional_prompts,
-			effort: effort.into(),
-			executor: DefaultClaudeCodeExecutor::new(model),
+			effort: effort.clone(),
+			executor: DefaultCodexExecutor::new(model, effort),
 		}
 	}
 }
 
-impl<E: ClaudeCodeExecutor> ClaudeCodeBasedI18nTranslator<E> {
+impl<E: CodexExecutor> CodexCliBasedI18nTranslator<E> {
 	pub fn with_executor(executor: E) -> Self {
 		Self {
 			additional_prompts: Vec::new(),
-			effort: ClaudeCodeBasedI18nTranslator::<DefaultClaudeCodeExecutor>::DEFAULT_EFFORT.to_string(),
+			effort: CodexCliBasedI18nTranslator::<DefaultCodexExecutor>::DEFAULT_EFFORT.to_string(),
 			executor,
 		}
 	}
@@ -74,9 +80,9 @@ impl<E: ClaudeCodeExecutor> ClaudeCodeBasedI18nTranslator<E> {
 }
 
 #[async_trait]
-impl<E: ClaudeCodeExecutor> I18nTranslator for ClaudeCodeBasedI18nTranslator<E> {
+impl<E: CodexExecutor> I18nTranslator for CodexCliBasedI18nTranslator<E> {
 	fn translator_id(&self) -> &str {
-		"claude-code"
+		"codex"
 	}
 
 	async fn translate_values(
@@ -137,17 +143,28 @@ fn build_prompt(
 	lines.join("\n")
 }
 
-async fn execute_claude_code(model: &str, prompt: &str) -> J18nResult<String> {
+async fn execute_codex(model: &str, effort: &str, prompt: &str) -> J18nResult<String> {
 	let model_arg = format!("--model={model}");
+	let effort_override = format!("model_reasoning_effort={effort}");
 	let mut command = if cfg!(target_os = "windows") {
 		let mut command = Command::new("cmd");
 
-		command.args(["/C", "claude", &model_arg, "-p"]);
+		command.args([
+			"/C",
+			"codex",
+			"exec",
+			"--color",
+			"never",
+			&model_arg,
+			"-c",
+			&effort_override,
+			"-",
+		]);
 		command
 	} else {
-		let mut command = Command::new("claude");
+		let mut command = Command::new("codex");
 
-		command.args([&model_arg, "-p"]);
+		command.args(["exec", "--color", "never", &model_arg, "-c", &effort_override, "-"]);
 		command
 	};
 
@@ -158,23 +175,23 @@ async fn execute_claude_code(model: &str, prompt: &str) -> J18nResult<String> {
 
 	let mut child = command
 		.spawn()
-		.map_err(|e| J18nError::translator(format!("failed to spawn Claude Code process: {e}")))?;
+		.map_err(|e| J18nError::translator(format!("failed to spawn Codex CLI process: {e}")))?;
 
 	if let Some(stdin) = child.stdin.as_mut() {
 		stdin
 			.write_all(prompt.as_bytes())
 			.await
-			.map_err(|e| J18nError::translator(format!("failed to write prompt to Claude Code: {e}")))?;
+			.map_err(|e| J18nError::translator(format!("failed to write prompt to Codex CLI: {e}")))?;
 		stdin
 			.shutdown()
 			.await
-			.map_err(|e| J18nError::translator(format!("failed to close Claude Code stdin: {e}")))?;
+			.map_err(|e| J18nError::translator(format!("failed to close Codex CLI stdin: {e}")))?;
 	}
 
 	let output = child
 		.wait_with_output()
 		.await
-		.map_err(|e| J18nError::translator(format!("failed to wait for Claude Code: {e}")))?;
+		.map_err(|e| J18nError::translator(format!("failed to wait for Codex CLI: {e}")))?;
 
 	if !output.status.success() {
 		let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -185,7 +202,7 @@ async fn execute_claude_code(model: &str, prompt: &str) -> J18nResult<String> {
 			.unwrap_or_else(|| "<signal>".to_string());
 
 		return Err(J18nError::translator(format!(
-			"Claude Code process exited with code {exit_code}. Stderr: {stderr}"
+			"Codex CLI process exited with code {exit_code}. Stderr: {stderr}"
 		)));
 	}
 
@@ -224,7 +241,7 @@ mod tests {
 	}
 
 	#[async_trait]
-	impl ClaudeCodeExecutor for MockExecutor {
+	impl CodexExecutor for MockExecutor {
 		async fn execute(&self, prompt: &str) -> J18nResult<String> {
 			self.captured.lock().unwrap().push(prompt.to_string());
 
@@ -242,7 +259,7 @@ mod tests {
 	#[tokio::test]
 	async fn translates_values_via_separator() {
 		let (executor, captured) = MockExecutor::ok("olá<<<SEP>>>mundo");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
+		let translator = CodexCliBasedI18nTranslator::with_executor(executor);
 
 		let translated = translator
 			.translate_values(ENGLISH, PORTUGUESE, vec!["hello".into(), "world".into()])
@@ -254,22 +271,9 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn returns_response_strings_verbatim_after_trim() {
-		let (executor, _) = MockExecutor::ok("  Olá [0]!  ");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
-
-		let translated = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["Hello [0]!".into()])
-			.await
-			.unwrap();
-
-		assert_eq!(translated, vec!["Olá [0]!".to_string()]);
-	}
-
-	#[tokio::test]
 	async fn propagates_executor_errors() {
 		let executor = MockExecutor::err("boom");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
+		let translator = CodexCliBasedI18nTranslator::with_executor(executor);
 
 		let err = translator
 			.translate_values(ENGLISH, PORTUGUESE, vec!["a".into()])
@@ -283,27 +287,9 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn prompt_includes_language_names_and_values() {
-		let (executor, captured) = MockExecutor::ok("Olá");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
-
-		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()])
-			.await
-			.unwrap();
-
-		let prompts = captured.lock().unwrap();
-		let prompt = &prompts[0];
-
-		assert!(prompt.contains("from English to Portuguese"));
-		assert!(prompt.contains("[\"Hi\"]"));
-		assert!(prompt.contains(ENTRY_SEPARATOR));
-	}
-
-	#[tokio::test]
 	async fn prompt_includes_default_effort_directive() {
 		let (executor, captured) = MockExecutor::ok("Olá");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
+		let translator = CodexCliBasedI18nTranslator::with_executor(executor);
 
 		translator
 			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()])
@@ -319,7 +305,7 @@ mod tests {
 	#[tokio::test]
 	async fn prompt_reflects_custom_effort() {
 		let (executor, captured) = MockExecutor::ok("Olá");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor).with_effort("medium");
+		let translator = CodexCliBasedI18nTranslator::with_executor(executor).with_effort("low");
 
 		translator
 			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()])
@@ -329,42 +315,20 @@ mod tests {
 		let prompts = captured.lock().unwrap();
 		let prompt = &prompts[0];
 
-		assert!(prompt.contains("Use medium reasoning effort."));
-		assert!(!prompt.contains("Use high reasoning effort."));
-	}
-
-	#[tokio::test]
-	async fn prompt_no_longer_mentions_music_specific_terms() {
-		let (executor, captured) = MockExecutor::ok("X");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
-
-		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
-			.await
-			.unwrap();
-
-		let prompts = captured.lock().unwrap();
-		let prompt = &prompts[0];
-
-		for forbidden in ["music", "playlist", "track", "song", "artwork", "touch"] {
-			assert!(
-				!prompt.to_lowercase().contains(forbidden),
-				"prompt contains forbidden term \"{forbidden}\": {prompt}"
-			);
-		}
+		assert!(prompt.contains("Use low reasoning effort."));
 	}
 
 	#[test]
-	fn translator_id_is_claude_code() {
-		let translator = ClaudeCodeBasedI18nTranslator::new(Vec::new());
+	fn translator_id_is_codex() {
+		let translator = CodexCliBasedI18nTranslator::new(Vec::new());
 
-		assert_eq!(translator.translator_id(), "claude-code");
+		assert_eq!(translator.translator_id(), "codex");
 	}
 
 	#[tokio::test]
 	async fn additional_prompts_are_injected_between_placeholder_warnings() {
 		let (executor, captured) = MockExecutor::ok("X");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor)
+		let translator = CodexCliBasedI18nTranslator::with_executor(executor)
 			.with_additional_prompts(vec!["INJECTED-CONTEXT-A".to_string(), "INJECTED-CONTEXT-B".to_string()]);
 
 		translator
@@ -386,22 +350,5 @@ mod tests {
 		assert!(placeholder_position < injected_a_position);
 		assert!(injected_a_position < injected_b_position);
 		assert!(injected_b_position < reminder_position);
-	}
-
-	#[tokio::test]
-	async fn no_additional_prompts_means_no_extra_lines_in_prompt() {
-		let (executor, captured) = MockExecutor::ok("X");
-		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
-
-		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
-			.await
-			.unwrap();
-
-		let prompts = captured.lock().unwrap();
-		let prompt = &prompts[0];
-
-		assert!(prompt.contains("DO NOT remove, skip or modify placeholders"));
-		assert!(prompt.contains("Once again, DO NOT remove placeholders"));
 	}
 }

@@ -119,10 +119,7 @@ pub fn parse_namespace_token_position(resolved_reference_template: &Path) -> Res
 	})?;
 	let before_token = &display[..token_position];
 	let after_token = &display[token_position + NAMESPACE_TOKEN.len()..];
-	let component_start_in_before = before_token
-		.rfind(['/', '\\'])
-		.map(|index| index + 1)
-		.unwrap_or(0);
+	let component_start_in_before = before_token.rfind(['/', '\\']).map(|index| index + 1).unwrap_or(0);
 	let component_prefix = before_token[component_start_in_before..].to_string();
 	let component_end_in_after = after_token.find(['/', '\\']).unwrap_or(after_token.len());
 	let component_suffix = after_token[..component_end_in_after].to_string();
@@ -179,12 +176,11 @@ pub async fn discover_namespaces_from_reference(resolved_reference_template: &Pa
 	let template_string = resolved_reference_template.to_string_lossy().to_string();
 	let mut namespaces: Vec<String> = Vec::new();
 
-	while let Some(entry) = entries.next_entry().await.with_context(|| {
-		format!(
-			"failed to read entry in \"{}\"",
-			position.discovery_directory.display()
-		)
-	})? {
+	while let Some(entry) = entries
+		.next_entry()
+		.await
+		.with_context(|| format!("failed to read entry in \"{}\"", position.discovery_directory.display()))?
+	{
 		let file_type = entry
 			.file_type()
 			.await
@@ -221,10 +217,7 @@ pub async fn discover_namespaces_from_reference(resolved_reference_template: &Pa
 
 		let candidate_path = PathBuf::from(substitute_namespace(&template_string, namespace));
 
-		if !tokio::fs::try_exists(&candidate_path)
-			.await
-			.unwrap_or(false)
-		{
+		if !tokio::fs::try_exists(&candidate_path).await.unwrap_or(false) {
 			continue;
 		}
 
@@ -399,7 +392,10 @@ mod tests {
 		assert_eq!(runs.len(), 2);
 		assert_eq!(runs[0].namespace.as_deref(), Some("common"));
 		assert_eq!(runs[0].reference_file, "locales/en/common.json");
-		assert_eq!(runs[0].target_files, vec!["locales/pt/common.json", "locales/es/common.json"]);
+		assert_eq!(
+			runs[0].target_files,
+			vec!["locales/pt/common.json", "locales/es/common.json"]
+		);
 		assert_eq!(runs[1].namespace.as_deref(), Some("auth"));
 		assert_eq!(runs[1].reference_file, "locales/en/auth.json");
 	}
@@ -418,11 +414,7 @@ mod tests {
 
 	#[test]
 	fn expand_with_list_errors_on_invalid_namespace_name() {
-		let result = expand_with_list(
-			"locales/en/{namespace}.json",
-			&[],
-			&["bad/name".to_string()],
-		);
+		let result = expand_with_list("locales/en/{namespace}.json", &[], &["bad/name".to_string()]);
 
 		assert!(result.is_err());
 	}
@@ -499,7 +491,9 @@ mod tests {
 
 		tokio::fs::create_dir_all(&locales_en).await.unwrap();
 		tokio::fs::write(locales_en.join("common.json"), "{}").await.unwrap();
-		tokio::fs::write(locales_en.join(".hash-cache.json"), "{}").await.unwrap();
+		tokio::fs::write(locales_en.join(".hash-cache.json"), "{}")
+			.await
+			.unwrap();
 
 		let template = locales_en.join("{namespace}.json");
 		let namespaces = discover_namespaces_from_reference(&template).await.unwrap();
@@ -513,10 +507,16 @@ mod tests {
 		let locales_en = dir.path().join("locales").join("en");
 
 		tokio::fs::create_dir_all(&locales_en).await.unwrap();
-		tokio::fs::write(locales_en.join("i18n-common-bundle.json"), "{}").await.unwrap();
-		tokio::fs::write(locales_en.join("i18n-auth-bundle.json"), "{}").await.unwrap();
+		tokio::fs::write(locales_en.join("i18n-common-bundle.json"), "{}")
+			.await
+			.unwrap();
+		tokio::fs::write(locales_en.join("i18n-auth-bundle.json"), "{}")
+			.await
+			.unwrap();
 		tokio::fs::write(locales_en.join("README.md"), "ignored").await.unwrap();
-		tokio::fs::write(locales_en.join("i18n-broken.json"), "ignored").await.unwrap();
+		tokio::fs::write(locales_en.join("i18n-broken.json"), "ignored")
+			.await
+			.unwrap();
 
 		let template = locales_en.join("i18n-{namespace}-bundle.json");
 		let namespaces = discover_namespaces_from_reference(&template).await.unwrap();
@@ -556,9 +556,7 @@ mod tests {
 		tokio::fs::create_dir_all(features.join("with-i18n").join("i18n"))
 			.await
 			.unwrap();
-		tokio::fs::create_dir_all(features.join("no-i18n"))
-			.await
-			.unwrap();
+		tokio::fs::create_dir_all(features.join("no-i18n")).await.unwrap();
 		tokio::fs::write(features.join("with-i18n").join("i18n").join("en.json"), "{}")
 			.await
 			.unwrap();
@@ -610,7 +608,10 @@ mod tests {
 
 	#[test]
 	fn fixed_prefix_directory_falls_back_to_dot_when_no_directory_prefix() {
-		assert_eq!(fixed_prefix_directory(Path::new("{namespace}.json")), PathBuf::from("."));
+		assert_eq!(
+			fixed_prefix_directory(Path::new("{namespace}.json")),
+			PathBuf::from(".")
+		);
 	}
 
 	#[test]

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 pub const GEMINI_API_KEY_ENV_VAR: &str = "GEMINI_API_KEY";
 
-const DEFAULT_MODEL_NAME: &str = "gemini-3.1-pro-preview";
+pub const DEFAULT_MODEL_NAME: &str = "gemini-3.1-pro-preview";
 const SYSTEM_INSTRUCTIONS: &str =
 	"Answer ONLY with a JSON array containing string elements, one for each translated value, \
 	in the same order as their inputs. Do NOT embed the JSON array in Markdown, do NOT write \
@@ -88,6 +88,10 @@ impl GeminiApiI18nTranslator<DefaultGeminiTransport> {
 	pub const TRANSLATOR_ID: &'static str = "gemini-api";
 
 	pub fn new(additional_prompts: Vec<String>) -> J18nResult<Self> {
+		Self::with_settings(additional_prompts, DEFAULT_MODEL_NAME.to_string())
+	}
+
+	pub fn with_settings(additional_prompts: Vec<String>, model_name: impl Into<String>) -> J18nResult<Self> {
 		let api_key = std::env::var(GEMINI_API_KEY_ENV_VAR).map_err(|_| J18nError::EnvVarMissing {
 			name: GEMINI_API_KEY_ENV_VAR,
 		})?;
@@ -95,7 +99,7 @@ impl GeminiApiI18nTranslator<DefaultGeminiTransport> {
 
 		Ok(Self {
 			additional_prompts,
-			model_name: DEFAULT_MODEL_NAME.to_string(),
+			model_name: model_name.into(),
 			transport,
 		})
 	}

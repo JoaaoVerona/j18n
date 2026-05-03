@@ -31,8 +31,10 @@ rules, file layout, and what gets re-translated when.
   `locales/{lang}/{namespace}.json` layout (or any layout with a
   `{namespace}` token in the path) and j18n handles every namespace in one
   run. Namespaces can be listed explicitly or auto-discovered with `"*"`.
-- **Pluggable backends** — Claude Code (the local `claude` CLI) or the Gemini
-  HTTP API. Adding another is a small trait impl.
+- **Pluggable backends** — Claude Code (the local `claude` CLI), the Gemini
+  HTTP API, or Codex CLI (the local `codex` CLI). Each backend lets you pick
+  the model, and the CLI-based ones also let you pick a reasoning effort
+  level. Adding another is a small trait impl.
 - **Free-form language names** — write `"Brazilian Portuguese"` or
   `"Simplified Chinese (Taiwan-style punctuation)"` and that's literally what
   the LLM sees. No hardcoded language list to limit you.
@@ -88,29 +90,35 @@ Edit it to point at your locales:
 Sync:
 
 ```sh
-./target/release/j18n sync my-project.json
+./target/release/j18n sync -f my-project.json
 ```
 
 `pt.json` and `es.json` now contain translations of every key in `en.json`.
 Run again at any time — only entries whose `en.json` value changed (or that
 are missing in the target) are re-translated.
 
+If you name your config file `j18n.json` (the default), you can drop the
+`-f` flag entirely and just run `j18n sync`.
+
 ## Commands
 
 ```
-j18n init              <PATH>          # write a skeleton config to <PATH>
-j18n sync              <CONFIG>...     # translate missing or changed entries
-j18n regenerate        <CONFIG>...     # re-translate every entry, replacing existing values
-j18n check             <CONFIG>...     # dry-run sync; exits non-zero if anything would change
-j18n baseline          <CONFIG>...     # record current reference hashes without translating; use when adopting j18n on a project that already has translations
-j18n install-git-hook  <CONFIG>...     # install a pre-commit hook in the current repo that runs `j18n check`
+j18n init              [-f <PATH>]     # write a skeleton config (defaults to j18n.json)
+j18n sync              [-f <PATH>...]  # translate missing or changed entries
+j18n regenerate        [-f <PATH>...]  # re-translate every entry, replacing existing values
+j18n check             [-f <PATH>...]  # dry-run sync; exits non-zero if anything would change
+j18n baseline          [-f <PATH>...]  # record current reference hashes without translating; use when adopting j18n on a project that already has translations
+j18n install-git-hook  [-f <PATH>...]  # install a pre-commit hook in the current repo that runs `j18n check`
 ```
 
-Each command (other than `init` and `install-git-hook`) accepts one or more
-configs and processes them in order. `check` is meant for CI pipelines; it
-exits with a non-zero status if any target locale is out of sync (missing
-keys, stale keys, or changed reference values). `install-git-hook` writes
-`.git/hooks/pre-commit` so commits fail until you run `j18n sync`.
+Every command takes its config path via `-f`/`--file` and defaults to
+`j18n.json` in the current directory when omitted. For commands that read a
+config (everything except `init`), pass `-f` multiple times to act on
+several configs in one run (e.g. `j18n check -f web.json -f mobile.json`).
+`check` is meant for CI pipelines; it exits with a non-zero status if any
+target locale is out of sync (missing keys, stale keys, or changed reference
+values). `install-git-hook` writes `.git/hooks/pre-commit` so commits fail
+until you run `j18n sync`.
 
 `baseline` writes (or merges into) the hash cache file from the **current**
 reference and target file contents, marking each existing target translation
@@ -139,7 +147,7 @@ file) are preserved.
 | `namespaces`             | string \| string[] *(optional)* | `"*"` to auto-discover namespaces from the reference's parent directory, or an explicit list. Required when any `file` contains `{namespace}`; forbidden otherwise. See **Namespaces**. |
 | `parallelBatches`        | integer (≥ 1)       | Max LLM batches in flight. `init` default: 3. |
 | `referenceI18n`          | object              | Source locale, same shape as a target. |
-| `translator`             | enum                | `"claude-code"` or `"gemini-api"`. |
+| `translator`             | string              | `"<kind>[/<model>[/<effort>]]"`. See **Backends**. |
 
 Paths in `referenceI18n.file`, `generateI18nFor[].file`, and
 `hashCacheLocation` resolve relative to the directory of the config file.
@@ -235,10 +243,33 @@ newlines — j18n validates this at write time.
 
 ## Backends
 
+The `translator` field is a slash-separated string of the form
+`"<kind>[/<model>[/<effort>]]"`. Omitted segments fall back to per-backend
+defaults.
+
+| Kind          | Format                                | Default model           | Default effort | Notes |
+| ------------- | ------------------------------------- | ----------------------- | -------------- | ----- |
+| `claude-code` | `claude-code[/<model>[/<effort>]]`    | `opus`                  | `high`         | Effort is injected as a directive line in the prompt — the CLI itself doesn't have a native effort flag. |
+| `gemini-api`  | `gemini-api[/<model>]`                | `gemini-3.1-pro-preview`| (n/a)          | Model name without the `gemini-` prefix is auto-prefixed (so `3.1-pro` → `gemini-3.1-pro`). |
+| `codex`       | `codex[/<model>[/<effort>]]`          | `gpt-5.1`               | `high`         | Effort maps to `-c model_reasoning_effort=<effort>` and is also injected into the prompt. |
+
+Examples:
+
+```jsonc
+"translator": "claude-code"                  // opus, high effort
+"translator": "claude-code/opus/medium"      // opus, medium effort
+"translator": "claude-code/sonnet/low"       // sonnet, low effort
+"translator": "gemini-api"                   // default Gemini pro model
+"translator": "gemini-api/3.1-pro"           // gemini-3.1-pro
+"translator": "gemini-api/gemini-3.1-pro-preview"
+"translator": "codex/gpt-5.1"                // gpt-5.1, high effort
+"translator": "codex/gpt-5.1/low"            // gpt-5.1, low effort
+```
+
 ### `claude-code`
 
-Spawns the local `claude` CLI (`cmd /C claude --model=opus -p` on Windows,
-`claude --model=opus -p` elsewhere). Make sure `claude` is on `PATH`.
+Spawns the local `claude` CLI (`cmd /C claude --model=<model> -p` on Windows,
+`claude --model=<model> -p` elsewhere). Make sure `claude` is on `PATH`.
 
 ### `gemini-api`
 
@@ -248,6 +279,12 @@ the environment; fails fast at startup if missing.
 ```sh
 GEMINI_API_KEY=... j18n sync my-project.json
 ```
+
+### `codex`
+
+Spawns the local `codex` CLI in non-interactive mode
+(`codex exec --color never --model=<model> -c model_reasoning_effort=<effort> -`)
+and feeds the prompt over stdin. Make sure `codex` is on `PATH`.
 
 ## Patterns
 
