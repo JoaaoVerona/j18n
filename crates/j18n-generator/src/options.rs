@@ -6,7 +6,7 @@ use std::path::PathBuf;
 pub struct J18nOptions {
 	pub batch_size: usize,
 	pub exclude_patterns: Vec<PathPattern>,
-	pub hash_cache_path: PathBuf,
+	pub hash_cache_location: PathBuf,
 	pub interpolation_patterns: Vec<Regex>,
 	pub parallel_batches: usize,
 }
@@ -33,7 +33,7 @@ mod tests {
 		J18nOptions {
 			batch_size,
 			exclude_patterns: vec![],
-			hash_cache_path: PathBuf::from(".hash-cache.json"),
+			hash_cache_location: PathBuf::from(".j18n-cache.ini"),
 			interpolation_patterns: vec![],
 			parallel_batches,
 		}

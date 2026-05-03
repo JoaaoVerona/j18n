@@ -7,8 +7,8 @@ pub mod reader;
 pub mod writer;
 
 pub use compare::natural_key_cmp;
-pub use hash_cache::I18nHashingCache;
-pub use hashing::{java_string_hashcode_hex, I18nHashing};
+pub use hash_cache::{validate_key, validate_target_id, I18nHashingStore};
+pub use hashing::{content_hash_hex, I18nHashing};
 pub use indent::{detect_indentation, detect_indentation_unit, DEFAULT_INDENT};
 pub use json_walker::walk_json_tree_to_map;
 pub use reader::read_i18n_data;

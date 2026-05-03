@@ -134,7 +134,7 @@ file) are preserved.
 | `batchSize`              | integer (≥ 1)       | Entries per LLM call. `init` default: 50. |
 | `excludePatterns`        | string[]            | Glob patterns of dot-separated keys to skip. See **Patterns**. |
 | `generateI18nFor`        | object[]            | Target locales: `{ "file": "...", "language": "..." }`. |
-| `hashCacheLocation`      | string *(optional)* | Override where the cache lives. Defaults to `.hash-cache.json` in the reference file's directory. |
+| `hashCacheLocation`      | string *(optional)* | Override where the cache file lives. Defaults to `.j18n-cache.ini` in the reference file's directory (or the deepest fixed-prefix directory when using namespaces). |
 | `interpolationPatterns`  | string[]            | Regexes matching substrings to preserve verbatim through translation. See **Patterns**. |
 | `namespaces`             | string \| string[] *(optional)* | `"*"` to auto-discover namespaces from the reference's parent directory, or an explicit list. Required when any `file` contains `{namespace}`; forbidden otherwise. See **Namespaces**. |
 | `parallelBatches`        | integer (≥ 1)       | Max LLM batches in flight. `init` default: 3. |
@@ -201,21 +201,37 @@ gets processed:
   `features/feat-{namespace}-mod/en.json`).
 - Wildcard discovery skips dotfiles and verifies that the **full**
   substituted reference path exists, so directories without the expected
-  inner file (and stray dotfiles like `.hash-cache.json`) are never
+  inner file (and stray dotfiles like `.j18n-cache.ini`) are never
   mistaken for a namespace.
 - Files or directories whose names don't match the pattern (e.g. a stray
   `README.md`) are ignored.
 
 ### Hash cache location with namespaces
 
-Default: `<deepest-fixed-prefix-dir>/.hash-cache.json`, where the "deepest
+Default: `<deepest-fixed-prefix-dir>/.j18n-cache.ini`, where the "deepest
 fixed prefix" is the part of the reference template before the path component
 containing `{namespace}`. For `locales/en/{namespace}.json` that's
 `locales/en/`. Override with `hashCacheLocation` if you want it elsewhere.
 
-The cache holds entries for every (target, namespace) combination in a single
-file — they're keyed by the substituted file path, so namespaces never
-collide.
+The cache is one INI-style file with one section per `(target, namespace)`
+combination, sorted alphabetically by target id, with `key=hash` lines
+sorted naturally per section. Sync, check, and baseline each stream the
+file line-by-line and only retain the section for the target they're
+processing, keeping memory bounded regardless of project size.
+
+```ini
+[locales/pt/auth.json@Portuguese]
+login.password=4f6a9
+login.title=-8a0ced2
+[locales/pt/common.json@Portuguese]
+button.cancel=61
+button.ok=c21
+```
+
+Saves rewrite the file via a temp + atomic rename, so an interrupted save
+never leaves the cache in a half-written state. Target ids must not
+contain `[`, `]`, or newlines; cache keys must not contain `=` or
+newlines — j18n validates this at write time.
 
 ## Backends
 

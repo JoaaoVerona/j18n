@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-const HASH_CACHE_FILE_NAME: &str = ".hash-cache.json";
+const HASH_CACHE_FILE_NAME: &str = ".j18n-cache.ini";
 
 const SKELETON_CONFIG: &str = concat!(
 	"{\n",
@@ -108,13 +108,13 @@ async fn resolve_config(config_path: &Path) -> Result<ResolvedConfig> {
 		.with_context(|| format!("invalid config \"{}\"", config_path.display()))?;
 
 	let resolved_reference_template = resolve_relative(config_path, Path::new(&config.reference_i18n.file));
-	let hash_cache_path =
-		resolve_hash_cache_path(config_path, &config.hash_cache_location, &resolved_reference_template);
+	let hash_cache_location =
+		resolve_hash_cache_location(config_path, &config.hash_cache_location, &resolved_reference_template);
 	let runs = build_runs(config_path, &config, &resolved_reference_template).await?;
 	let options = J18nOptions {
 		batch_size: config.batch_size,
 		exclude_patterns,
-		hash_cache_path,
+		hash_cache_location,
 		interpolation_patterns,
 		parallel_batches: config.parallel_batches,
 	};
@@ -300,7 +300,7 @@ async fn baseline(args: CommandArgs) -> Result<()> {
 
 		info!(
 			"Wrote hash cache to \"{}\"",
-			resolved.options.hash_cache_path.display()
+			resolved.options.hash_cache_location.display()
 		);
 	}
 
@@ -451,7 +451,7 @@ fn build_definition(config_path: &Path, file_string: &str, language: &str) -> I1
 	}
 }
 
-fn resolve_hash_cache_path(
+fn resolve_hash_cache_location(
 	config_path: &Path,
 	hash_cache_location: &Option<PathBuf>,
 	reference_file: &Path,
@@ -562,20 +562,20 @@ mod tests {
 	}
 
 	#[test]
-	fn resolve_hash_cache_path_uses_explicit_value_when_present() {
-		let resolved = resolve_hash_cache_path(
+	fn resolve_hash_cache_location_uses_explicit_value_when_present() {
+		let resolved = resolve_hash_cache_location(
 			Path::new("/configs/api.json"),
-			&Some(PathBuf::from(".cache.json")),
+			&Some(PathBuf::from(".my-cache.ini")),
 			Path::new("/configs/locales/en.json"),
 		);
 
-		assert_eq!(resolved, PathBuf::from("/configs").join(".cache.json"));
+		assert_eq!(resolved, PathBuf::from("/configs").join(".my-cache.ini"));
 	}
 
 	#[test]
-	fn resolve_hash_cache_path_uses_explicit_absolute_value_unchanged() {
-		let absolute = absolute_path(&["caches", "j18n.json"]);
-		let resolved = resolve_hash_cache_path(
+	fn resolve_hash_cache_location_uses_explicit_absolute_value_unchanged() {
+		let absolute = absolute_path(&["caches", "j18n.ini"]);
+		let resolved = resolve_hash_cache_location(
 			Path::new("/configs/api.json"),
 			&Some(absolute.clone()),
 			Path::new("/configs/locales/en.json"),
@@ -585,14 +585,14 @@ mod tests {
 	}
 
 	#[test]
-	fn resolve_hash_cache_path_defaults_to_reference_directory() {
-		let resolved = resolve_hash_cache_path(
+	fn resolve_hash_cache_location_defaults_to_fixed_prefix_directory() {
+		let resolved = resolve_hash_cache_location(
 			Path::new("/configs/api.json"),
 			&None,
 			Path::new("/anywhere/locales/en.json"),
 		);
 
-		assert_eq!(resolved, PathBuf::from("/anywhere/locales/.hash-cache.json"));
+		assert_eq!(resolved, PathBuf::from("/anywhere/locales/.j18n-cache.ini"));
 	}
 
 	#[tokio::test]
@@ -659,24 +659,26 @@ mod tests {
 	}
 
 	async fn write_matching_hash_cache(dir: &TempDir, target: &str, entries: &[(&str, &str)]) {
-		use j18n_io::{java_string_hashcode_hex, I18nHashing, I18nHashingCache};
+		use j18n_io::{content_hash_hex, I18nHashing, I18nHashingStore};
 		use std::collections::HashMap;
 
 		let mut hashes = HashMap::new();
 
 		for (key, value) in entries {
-			hashes.insert((*key).to_string(), java_string_hashcode_hex(value));
+			hashes.insert((*key).to_string(), content_hash_hex(value));
 		}
 
-		let mut cache = I18nHashingCache::empty();
+		let store = I18nHashingStore::at(dir.path().join(".j18n-cache.ini"));
 
-		cache.set(
-			format!("{target}.json@{target}"),
-			I18nHashing {
-				json_key_to_hash_map: hashes,
-			},
-		);
-		cache.save_to(&dir.path().join(".hash-cache.json")).await.unwrap();
+		store
+			.save(
+				&format!("{target}.json@{target}"),
+				&I18nHashing {
+					json_key_to_hash_map: hashes,
+				},
+			)
+			.await
+			.unwrap();
 	}
 
 	#[tokio::test]
@@ -1063,8 +1065,8 @@ mod tests {
 		let resolved = resolve_config(&config).await.unwrap();
 
 		assert_eq!(
-			resolved.options.hash_cache_path,
-			dir.path().join("locales").join("en").join(".hash-cache.json"),
+			resolved.options.hash_cache_location,
+			dir.path().join("locales").join("en").join(".j18n-cache.ini"),
 		);
 	}
 
@@ -1088,26 +1090,31 @@ mod tests {
 			r#"["common", "auth"]"#,
 		);
 
-		use j18n_io::{java_string_hashcode_hex, I18nHashing, I18nHashingCache};
+		use j18n_io::{content_hash_hex, I18nHashing, I18nHashingStore};
 		use std::collections::HashMap;
-		let mut cache = I18nHashingCache::empty();
+		let store = I18nHashingStore::at(locales_en.join(".j18n-cache.ini"));
 		let mut common_hashes = HashMap::new();
-		common_hashes.insert("a".to_string(), java_string_hashcode_hex("A"));
-		cache.set(
-			"locales/pt/common.json@Portuguese".to_string(),
-			I18nHashing {
-				json_key_to_hash_map: common_hashes,
-			},
-		);
+		common_hashes.insert("a".to_string(), content_hash_hex("A"));
+		store
+			.save(
+				"locales/pt/common.json@Portuguese",
+				&I18nHashing {
+					json_key_to_hash_map: common_hashes,
+				},
+			)
+			.await
+			.unwrap();
 		let mut auth_hashes = HashMap::new();
-		auth_hashes.insert("x".to_string(), java_string_hashcode_hex("X"));
-		cache.set(
-			"locales/pt/auth.json@Portuguese".to_string(),
-			I18nHashing {
-				json_key_to_hash_map: auth_hashes,
-			},
-		);
-		cache.save_to(&locales_en.join(".hash-cache.json")).await.unwrap();
+		auth_hashes.insert("x".to_string(), content_hash_hex("X"));
+		store
+			.save(
+				"locales/pt/auth.json@Portuguese",
+				&I18nHashing {
+					json_key_to_hash_map: auth_hashes,
+				},
+			)
+			.await
+			.unwrap();
 
 		check(CommandArgs { configs: vec![config] }).await.unwrap();
 	}
@@ -1181,27 +1188,32 @@ mod tests {
 			r#"["common", "auth"]"#,
 		);
 
-		use j18n_io::{java_string_hashcode_hex, I18nHashing, I18nHashingCache};
+		use j18n_io::{content_hash_hex, I18nHashing, I18nHashingStore};
 		use std::collections::HashMap;
-		let mut cache = I18nHashingCache::empty();
+		let store = I18nHashingStore::at(locales_en.join(".j18n-cache.ini"));
 		let mut common_hashes = HashMap::new();
-		common_hashes.insert("a".to_string(), java_string_hashcode_hex("A"));
-		cache.set(
-			"locales/pt/common.json@Portuguese".to_string(),
-			I18nHashing {
-				json_key_to_hash_map: common_hashes,
-			},
-		);
+		common_hashes.insert("a".to_string(), content_hash_hex("A"));
+		store
+			.save(
+				"locales/pt/common.json@Portuguese",
+				&I18nHashing {
+					json_key_to_hash_map: common_hashes,
+				},
+			)
+			.await
+			.unwrap();
 		let mut auth_hashes = HashMap::new();
-		auth_hashes.insert("x".to_string(), java_string_hashcode_hex("X"));
-		auth_hashes.insert("y".to_string(), java_string_hashcode_hex("Y"));
-		cache.set(
-			"locales/pt/auth.json@Portuguese".to_string(),
-			I18nHashing {
-				json_key_to_hash_map: auth_hashes,
-			},
-		);
-		cache.save_to(&locales_en.join(".hash-cache.json")).await.unwrap();
+		auth_hashes.insert("x".to_string(), content_hash_hex("X"));
+		auth_hashes.insert("y".to_string(), content_hash_hex("Y"));
+		store
+			.save(
+				"locales/pt/auth.json@Portuguese",
+				&I18nHashing {
+					json_key_to_hash_map: auth_hashes,
+				},
+			)
+			.await
+			.unwrap();
 
 		let err = check(CommandArgs { configs: vec![config] }).await.unwrap_err();
 

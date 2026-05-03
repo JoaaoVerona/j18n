@@ -15,7 +15,7 @@ impl I18nHashing {
 		let json_key_to_hash_map = data
 			.walked_tree_map
 			.iter()
-			.map(|(key, value)| (key.clone(), java_string_hashcode_hex(value)))
+			.map(|(key, value)| (key.clone(), content_hash_hex(value)))
 			.collect();
 
 		Self { json_key_to_hash_map }
@@ -41,29 +41,22 @@ impl I18nHashing {
 	}
 }
 
-pub fn java_string_hashcode_hex(value: &str) -> String {
-	let mut hash: i32 = 0;
-	let mut buffer = [0u16; 2];
+const FNV_64_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_64_PRIME: u64 = 0x100000001b3;
 
-	for character in value.chars() {
-		let units = character.encode_utf16(&mut buffer);
+/// Deterministic 64-bit content hash of `value`'s UTF-8 bytes, formatted as a
+/// fixed-width 16-character lowercase hex string. Uses FNV-1a — std-only, no
+/// external dependencies, identical output across platforms and Rust
+/// versions.
+pub fn content_hash_hex(value: &str) -> String {
+	let mut hash: u64 = FNV_64_OFFSET_BASIS;
 
-		for unit in units.iter() {
-			hash = hash.wrapping_mul(31).wrapping_add(*unit as i32);
-		}
+	for byte in value.as_bytes() {
+		hash ^= *byte as u64;
+		hash = hash.wrapping_mul(FNV_64_PRIME);
 	}
 
-	format_signed_hex(hash)
-}
-
-fn format_signed_hex(value: i32) -> String {
-	let widened = value as i64;
-
-	if widened < 0 {
-		format!("-{:x}", -widened)
-	} else {
-		format!("{:x}", widened)
-	}
+	format!("{hash:016x}")
 }
 
 #[cfg(test)]
@@ -71,36 +64,63 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn empty_string_hashes_to_zero() {
-		assert_eq!(java_string_hashcode_hex(""), "0");
+	fn empty_string_hashes_to_fnv_offset_basis() {
+		assert_eq!(content_hash_hex(""), "cbf29ce484222325");
 	}
 
 	#[test]
-	fn matches_known_java_hashcodes() {
-		assert_eq!(java_string_hashcode_hex("a"), "61");
-		assert_eq!(java_string_hashcode_hex("ab"), "c21");
-		assert_eq!(java_string_hashcode_hex("abc"), "17862");
+	fn output_is_fixed_width_sixteen_lowercase_hex_chars() {
+		for input in ["a", "hello", "a much longer sentence with punctuation, etc."] {
+			let hash = content_hash_hex(input);
+
+			assert_eq!(hash.len(), 16, "input {input:?} produced {hash:?}");
+			assert!(
+				hash.chars().all(|character| matches!(character, '0'..='9' | 'a'..='f')),
+				"input {input:?} produced non-hex {hash:?}",
+			);
+		}
 	}
 
 	#[test]
-	fn produces_negative_hex_for_strings_that_overflow_i32() {
-		let hash = java_string_hashcode_hex("Delete my account");
-
-		assert!(hash.starts_with('-'), "expected negative hex, got {hash}");
+	fn deterministic_for_same_input() {
+		assert_eq!(content_hash_hex("hello"), content_hash_hex("hello"));
+		assert_eq!(content_hash_hex("héllo"), content_hash_hex("héllo"));
+		assert_eq!(content_hash_hex(""), content_hash_hex(""));
 	}
 
 	#[test]
-	fn matches_kotlin_hash_cache_values_for_real_strings() {
-		assert_eq!(java_string_hashcode_hex("This account no longer exists."), "10f79085");
-		assert_eq!(java_string_hashcode_hex("Delete my account"), "-8a0ced2");
+	fn distinguishes_short_strings_that_collide_in_java_hashcode() {
+		assert_ne!(content_hash_hex("Aa"), content_hash_hex("BB"));
+		assert_ne!(content_hash_hex("FB"), content_hash_hex("Ea"));
 	}
 
 	#[test]
-	fn handles_unicode_via_utf16_units() {
-		let hash = java_string_hashcode_hex("héllo");
+	fn distinguishes_real_translation_strings() {
+		assert_ne!(
+			content_hash_hex("This account no longer exists."),
+			content_hash_hex("Delete my account"),
+		);
+		assert_ne!(content_hash_hex("Hello"), content_hash_hex("Hi"));
+	}
 
-		assert!(!hash.is_empty());
-		assert_eq!(hash, java_string_hashcode_hex("héllo"));
+	#[test]
+	fn handles_unicode_via_utf8_bytes() {
+		let composed = content_hash_hex("héllo");
+		let ascii = content_hash_hex("hello");
+
+		assert_ne!(composed, ascii);
+		assert_eq!(composed, content_hash_hex("héllo"));
+	}
+
+	#[test]
+	fn from_i18n_data_uses_content_hash_for_each_value() {
+		let data = I18nData {
+			json_dict: Default::default(),
+			walked_tree_map: vec![("greeting".into(), "abc".into())],
+		};
+		let hashing = I18nHashing::from_i18n_data(&data);
+
+		assert_eq!(hashing.json_key_to_hash_map.get("greeting").unwrap(), &content_hash_hex("abc"));
 	}
 
 	#[test]

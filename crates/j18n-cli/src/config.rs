@@ -203,7 +203,7 @@ mod tests {
 				"batchSize": 50,
 				"excludePatterns": [],
 				"generateI18nFor": [{ "file": "pt.json", "language": "Portuguese" }],
-				"hashCacheLocation": "custom/.cache.json",
+				"hashCacheLocation": "custom/.j18n-cache.ini",
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
@@ -213,7 +213,7 @@ mod tests {
 
 		let config = load_config(&path).unwrap();
 
-		assert_eq!(config.hash_cache_location, Some(PathBuf::from("custom/.cache.json")));
+		assert_eq!(config.hash_cache_location, Some(PathBuf::from("custom/.j18n-cache.ini")));
 	}
 
 	#[test]

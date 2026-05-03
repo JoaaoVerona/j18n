@@ -5,7 +5,7 @@ pub use options::J18nOptions;
 use futures::stream::{self, StreamExt};
 use j18n_core::{GenerationMode, I18nData, I18nDefinition, J18nResult};
 use j18n_io::{
-	detect_indentation, java_string_hashcode_hex, read_i18n_data, write_i18n_tree_map, I18nHashing, I18nHashingCache,
+	detect_indentation, content_hash_hex, read_i18n_data, write_i18n_tree_map, I18nHashing, I18nHashingStore,
 	DEFAULT_INDENT,
 };
 use j18n_translator::{create_extrapolated_values, restore_extrapolated_values, I18nTranslator};
@@ -104,7 +104,7 @@ impl I18nGenerator {
 	{
 		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns).await?;
 		let reference_hashing = I18nHashing::from_i18n_data(&reference_data);
-		let mut hash_cache = I18nHashingCache::load_from(&options.hash_cache_path).await?;
+		let store = I18nHashingStore::at(&options.hash_cache_location);
 
 		debug!(
 			"Scanned {} total entries from {} dict",
@@ -116,7 +116,7 @@ impl I18nGenerator {
 
 		for target in generate_i18n_for {
 			let target_id = target_identifier(target);
-			let cached_hashing = hash_cache.get(&target_id).cloned().unwrap_or_else(I18nHashing::empty);
+			let cached_hashing = store.load(&target_id).await?;
 			let changed_keys = cached_hashing.compute_changed_keys(&reference_hashing);
 
 			debug!(
@@ -136,8 +136,7 @@ impl I18nGenerator {
 			)
 			.await?;
 
-			hash_cache.set(target_id, reference_hashing.clone());
-			hash_cache.save_to(&options.hash_cache_path).await?;
+			store.save(&target_id, &reference_hashing).await?;
 		}
 
 		info!(
@@ -162,7 +161,7 @@ impl I18nGenerator {
 		options: &J18nOptions,
 	) -> J18nResult<usize> {
 		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns).await?;
-		let mut hash_cache = I18nHashingCache::load_from(&options.hash_cache_path).await?;
+		let store = I18nHashingStore::at(&options.hash_cache_location);
 
 		debug!(
 			"Baselining {} target(s) against {} reference entries from {}",
@@ -184,7 +183,7 @@ impl I18nGenerator {
 				if target_keys.contains(key.as_str()) {
 					hashing_for_target
 						.json_key_to_hash_map
-						.insert(key.clone(), java_string_hashcode_hex(value));
+						.insert(key.clone(), content_hash_hex(value));
 				}
 			}
 
@@ -194,10 +193,8 @@ impl I18nGenerator {
 				hashing_for_target.json_key_to_hash_map.len(),
 				reference_data.walked_tree_map.len(),
 			);
-			hash_cache.set(target_identifier(target), hashing_for_target);
+			store.save(&target_identifier(target), &hashing_for_target).await?;
 		}
-
-		hash_cache.save_to(&options.hash_cache_path).await?;
 
 		Ok(generate_i18n_for.len())
 	}
@@ -209,7 +206,7 @@ impl I18nGenerator {
 	) -> J18nResult<CheckReport> {
 		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns).await?;
 		let reference_hashing = I18nHashing::from_i18n_data(&reference_data);
-		let hash_cache = I18nHashingCache::load_from(&options.hash_cache_path).await?;
+		let store = I18nHashingStore::at(&options.hash_cache_location);
 		let reference_entries = reference_data.walked_tree_map.len();
 
 		debug!(
@@ -221,7 +218,7 @@ impl I18nGenerator {
 
 		for target in generate_i18n_for {
 			let target_id = target_identifier(target);
-			let cached_hashing = hash_cache.get(&target_id).cloned().unwrap_or_else(I18nHashing::empty);
+			let cached_hashing = store.load(&target_id).await?;
 			let changed_keys = cached_hashing.compute_changed_keys(&reference_hashing);
 			let target_data = read_i18n_data(target, &options.exclude_patterns).await?;
 			let plan = compute_sync_plan(&reference_data, &target_data, &changed_keys, GenerationMode::Sync);
@@ -391,7 +388,7 @@ mod tests {
 	use super::*;
 	use async_trait::async_trait;
 	use j18n_core::PathPattern;
-	use j18n_io::{java_string_hashcode_hex, I18nHashing, I18nHashingCache};
+	use j18n_io::{content_hash_hex, I18nHashing, I18nHashingStore};
 	use regex::Regex;
 	use std::collections::HashMap;
 	use std::sync::Mutex;
@@ -473,7 +470,7 @@ mod tests {
 		J18nOptions {
 			batch_size: 50,
 			exclude_patterns: vec![],
-			hash_cache_path: dir.path().join(".hash-cache.json"),
+			hash_cache_location: dir.path().join(".j18n-cache"),
 			interpolation_patterns: vec![Regex::new(r"\{\{(.+?)\}\}").unwrap()],
 			parallel_batches: 3,
 		}
@@ -519,18 +516,20 @@ mod tests {
 			.unwrap();
 		fs::write(&target.file, r#"{"a": "AA"}"#).await.unwrap();
 
-		let mut cache = I18nHashingCache::empty();
+		let store = I18nHashingStore::at(&default_options(&dir).hash_cache_location);
 		let mut hashes = HashMap::new();
 
-		hashes.insert("a".to_string(), java_string_hashcode_hex("A"));
-		hashes.insert("b".to_string(), java_string_hashcode_hex("B"));
-		cache.set(
-			target_identifier(&target),
-			I18nHashing {
-				json_key_to_hash_map: hashes,
-			},
-		);
-		cache.save_to(&dir.path().join(".hash-cache.json")).await.unwrap();
+		hashes.insert("a".to_string(), content_hash_hex("A"));
+		hashes.insert("b".to_string(), content_hash_hex("B"));
+		store
+			.save(
+				&target_identifier(&target),
+				&I18nHashing {
+					json_key_to_hash_map: hashes,
+				},
+			)
+			.await
+			.unwrap();
 
 		let translator = MockTranslator::default();
 
@@ -635,16 +634,15 @@ mod tests {
 		.await
 		.unwrap();
 
-		let cache_path = dir.path().join(".hash-cache.json");
+		let store = I18nHashingStore::at(&default_options(&dir).hash_cache_location);
 
-		assert!(cache_path.exists());
+		assert!(store.file_path().is_file());
 
-		let cache = I18nHashingCache::load_from(&cache_path).await.unwrap();
-		let hashing = cache.get(&target_identifier(&target)).unwrap();
+		let hashing = store.load(&target_identifier(&target)).await.unwrap();
 
 		assert_eq!(
 			hashing.json_key_to_hash_map.get("a").unwrap(),
-			&java_string_hashcode_hex("A")
+			&content_hash_hex("A")
 		);
 	}
 
@@ -784,18 +782,20 @@ mod tests {
 		fs::write(&target.file, "{\n    \"a\": \"AA\"\n}\n").await.unwrap();
 
 		let translator = MockTranslator::default();
-		let mut cache = I18nHashingCache::empty();
+		let store = I18nHashingStore::at(&default_options(&dir).hash_cache_location);
 		let mut hashes = HashMap::new();
 
-		hashes.insert("a".to_string(), java_string_hashcode_hex("A"));
-		hashes.insert("b".to_string(), java_string_hashcode_hex("B"));
-		cache.set(
-			target_identifier(&target),
-			I18nHashing {
-				json_key_to_hash_map: hashes,
-			},
-		);
-		cache.save_to(&dir.path().join(".hash-cache.json")).await.unwrap();
+		hashes.insert("a".to_string(), content_hash_hex("A"));
+		hashes.insert("b".to_string(), content_hash_hex("B"));
+		store
+			.save(
+				&target_identifier(&target),
+				&I18nHashing {
+					json_key_to_hash_map: hashes,
+				},
+			)
+			.await
+			.unwrap();
 
 		I18nGenerator::execute(
 			&translator,
@@ -866,22 +866,21 @@ mod tests {
 
 		assert_eq!(count, 2);
 
-		let cache_path = dir.path().join(".hash-cache.json");
-		let cache = I18nHashingCache::load_from(&cache_path).await.unwrap();
-		let pt_hashing = cache.get(&target_identifier(&pt)).unwrap();
-		let es_hashing = cache.get(&target_identifier(&es)).unwrap();
+		let store = I18nHashingStore::at(&default_options(&dir).hash_cache_location);
+		let pt_hashing = store.load(&target_identifier(&pt)).await.unwrap();
+		let es_hashing = store.load(&target_identifier(&es)).await.unwrap();
 
 		assert_eq!(
 			pt_hashing.json_key_to_hash_map.get("a").unwrap(),
-			&java_string_hashcode_hex("A")
+			&content_hash_hex("A")
 		);
 		assert_eq!(
 			pt_hashing.json_key_to_hash_map.get("b").unwrap(),
-			&java_string_hashcode_hex("B")
+			&content_hash_hex("B")
 		);
 		assert_eq!(
 			es_hashing.json_key_to_hash_map.get("a").unwrap(),
-			&java_string_hashcode_hex("A")
+			&content_hash_hex("A")
 		);
 	}
 
@@ -900,10 +899,8 @@ mod tests {
 			.await
 			.unwrap();
 
-		let cache = I18nHashingCache::load_from(&dir.path().join(".hash-cache.json"))
-			.await
-			.unwrap();
-		let pt_hashing = cache.get(&target_identifier(&pt)).unwrap();
+		let store = I18nHashingStore::at(&default_options(&dir).hash_cache_location);
+		let pt_hashing = store.load(&target_identifier(&pt)).await.unwrap();
 
 		assert_eq!(pt_hashing.json_key_to_hash_map.len(), 2);
 		assert!(pt_hashing.json_key_to_hash_map.contains_key("a"));
@@ -926,10 +923,8 @@ mod tests {
 			.await
 			.unwrap();
 
-		let cache = I18nHashingCache::load_from(&dir.path().join(".hash-cache.json"))
-			.await
-			.unwrap();
-		let pt_hashing = cache.get(&target_identifier(&pt)).unwrap();
+		let store = I18nHashingStore::at(&default_options(&dir).hash_cache_location);
+		let pt_hashing = store.load(&target_identifier(&pt)).await.unwrap();
 
 		assert!(
 			pt_hashing.json_key_to_hash_map.is_empty(),
@@ -946,47 +941,50 @@ mod tests {
 		fs::write(&reference.file, r#"{"a": "A-NEW"}"#).await.unwrap();
 		fs::write(&pt.file, r#"{"a": "AA"}"#).await.unwrap();
 
-		let mut cache = I18nHashingCache::empty();
+		let store = I18nHashingStore::at(&default_options(&dir).hash_cache_location);
 		let mut stale_pt_hashes = HashMap::new();
 
-		stale_pt_hashes.insert("a".to_string(), java_string_hashcode_hex("A-OLD"));
-		cache.set(
-			target_identifier(&pt),
-			I18nHashing {
-				json_key_to_hash_map: stale_pt_hashes,
-			},
-		);
+		stale_pt_hashes.insert("a".to_string(), content_hash_hex("A-OLD"));
+		store
+			.save(
+				&target_identifier(&pt),
+				&I18nHashing {
+					json_key_to_hash_map: stale_pt_hashes,
+				},
+			)
+			.await
+			.unwrap();
+
 		let mut other_hashes = HashMap::new();
 
-		other_hashes.insert("x".to_string(), java_string_hashcode_hex("X"));
-		cache.set(
-			"unrelated/zh.json@Mandarin".to_string(),
-			I18nHashing {
-				json_key_to_hash_map: other_hashes,
-			},
-		);
-		cache.save_to(&dir.path().join(".hash-cache.json")).await.unwrap();
+		other_hashes.insert("x".to_string(), content_hash_hex("X"));
+		store
+			.save(
+				"unrelated/zh.json@Mandarin",
+				&I18nHashing {
+					json_key_to_hash_map: other_hashes,
+				},
+			)
+			.await
+			.unwrap();
 
 		I18nGenerator::baseline(&reference, &[pt.clone()], &default_options(&dir))
 			.await
 			.unwrap();
 
-		let reloaded = I18nHashingCache::load_from(&dir.path().join(".hash-cache.json"))
-			.await
-			.unwrap();
-		let pt_hashing = reloaded.get(&target_identifier(&pt)).unwrap();
+		let pt_hashing = store.load(&target_identifier(&pt)).await.unwrap();
 
 		assert_eq!(
 			pt_hashing.json_key_to_hash_map.get("a").unwrap(),
-			&java_string_hashcode_hex("A-NEW"),
+			&content_hash_hex("A-NEW"),
 			"baseline must override the stale hash for the target it touches",
 		);
 
-		let unrelated = reloaded.get("unrelated/zh.json@Mandarin").unwrap();
+		let unrelated = store.load("unrelated/zh.json@Mandarin").await.unwrap();
 
 		assert_eq!(
 			unrelated.json_key_to_hash_map.get("x").unwrap(),
-			&java_string_hashcode_hex("X"),
+			&content_hash_hex("X"),
 			"baseline must preserve cache entries for targets it does not touch",
 		);
 	}
