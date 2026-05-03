@@ -60,10 +60,7 @@ pub fn restore_extrapolated_value(extrapolated: &ExtrapolatedValue, translated_v
 	let mut current = translated_value.to_string();
 	let mut restored = 0usize;
 
-	loop {
-		let Some(captures) = substitutions_regex.captures(&current) else {
-			break;
-		};
+	while let Some(captures) = substitutions_regex.captures(&current) {
 		let whole_match = captures.get(0).expect("regex group 0 must exist").as_str().to_string();
 		let index_str = captures.get(1).expect("regex group 1 must exist").as_str();
 		let index: usize = index_str.parse().map_err(|_| {

@@ -492,7 +492,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Sync,
 			&default_options(&dir),
 		)
@@ -536,7 +536,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Sync,
 			&default_options(&dir),
 		)
@@ -567,7 +567,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Regenerate,
 			&default_options(&dir),
 		)
@@ -601,7 +601,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Sync,
 			&default_options(&dir),
 		)
@@ -627,7 +627,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Sync,
 			&default_options(&dir),
 		)
@@ -663,7 +663,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Regenerate,
 			&default_options(&dir),
 		)
@@ -697,7 +697,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Regenerate,
 			&options,
 		)
@@ -727,7 +727,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Regenerate,
 			&default_options(&dir),
 		)
@@ -752,7 +752,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Regenerate,
 			&default_options(&dir),
 		)
@@ -797,7 +797,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Sync,
 			&default_options(&dir),
 		)
@@ -830,7 +830,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[target.clone()],
+			std::slice::from_ref(&target),
 			GenerationMode::Regenerate,
 			&options,
 		)
@@ -892,7 +892,7 @@ mod tests {
 			.unwrap();
 		fs::write(&pt.file, r#"{"a": "AA", "b": "BB"}"#).await.unwrap();
 
-		I18nGenerator::baseline(&reference, &[pt.clone()], &default_options(&dir))
+		I18nGenerator::baseline(&reference, std::slice::from_ref(&pt), &default_options(&dir))
 			.await
 			.unwrap();
 
@@ -916,7 +916,7 @@ mod tests {
 
 		fs::write(&reference.file, r#"{"a": "A"}"#).await.unwrap();
 
-		I18nGenerator::baseline(&reference, &[pt.clone()], &default_options(&dir))
+		I18nGenerator::baseline(&reference, std::slice::from_ref(&pt), &default_options(&dir))
 			.await
 			.unwrap();
 
@@ -965,7 +965,7 @@ mod tests {
 			.await
 			.unwrap();
 
-		I18nGenerator::baseline(&reference, &[pt.clone()], &default_options(&dir))
+		I18nGenerator::baseline(&reference, std::slice::from_ref(&pt), &default_options(&dir))
 			.await
 			.unwrap();
 
@@ -997,7 +997,7 @@ mod tests {
 			.unwrap();
 		fs::write(&pt.file, r#"{"a": "AA", "b": "BB"}"#).await.unwrap();
 
-		I18nGenerator::baseline(&reference, &[pt.clone()], &default_options(&dir))
+		I18nGenerator::baseline(&reference, std::slice::from_ref(&pt), &default_options(&dir))
 			.await
 			.unwrap();
 
@@ -1006,7 +1006,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[pt.clone()],
+			std::slice::from_ref(&pt),
 			GenerationMode::Sync,
 			&default_options(&dir),
 		)
@@ -1029,10 +1029,10 @@ mod tests {
 		fs::write(&reference.file, r#"{"a": "A", "b": "B"}"#).await.unwrap();
 		fs::write(&pt.file, r#"{"a": "AA", "b": "BB"}"#).await.unwrap();
 
-		I18nGenerator::baseline(&reference, &[pt.clone()], &default_options(&dir))
+		I18nGenerator::baseline(&reference, std::slice::from_ref(&pt), &default_options(&dir))
 			.await
 			.unwrap();
-		let report = I18nGenerator::check(&reference, &[pt.clone()], &default_options(&dir))
+		let report = I18nGenerator::check(&reference, std::slice::from_ref(&pt), &default_options(&dir))
 			.await
 			.unwrap();
 
@@ -1049,7 +1049,7 @@ mod tests {
 		fs::write(&reference.file, r#"{"a": "A", "b": "B"}"#).await.unwrap();
 		fs::write(&pt.file, r#"{"a": "AA", "b": "BB"}"#).await.unwrap();
 
-		I18nGenerator::baseline(&reference, &[pt.clone()], &default_options(&dir))
+		I18nGenerator::baseline(&reference, std::slice::from_ref(&pt), &default_options(&dir))
 			.await
 			.unwrap();
 
@@ -1058,7 +1058,7 @@ mod tests {
 		I18nGenerator::execute(
 			&translator,
 			&reference,
-			&[pt.clone()],
+			std::slice::from_ref(&pt),
 			GenerationMode::Sync,
 			&default_options(&dir),
 		)
