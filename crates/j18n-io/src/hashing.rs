@@ -120,7 +120,10 @@ mod tests {
 		};
 		let hashing = I18nHashing::from_i18n_data(&data);
 
-		assert_eq!(hashing.json_key_to_hash_map.get("greeting").unwrap(), &content_hash_hex("abc"));
+		assert_eq!(
+			hashing.json_key_to_hash_map.get("greeting").unwrap(),
+			&content_hash_hex("abc")
+		);
 	}
 
 	#[test]

@@ -122,10 +122,12 @@ impl I18nHashingStore {
 			let mut bytes = serialized_section.into_bytes();
 
 			bytes.push(b'\n');
-			fs::write(&self.file_path, &bytes).await.map_err(|source| J18nError::Io {
-				path: self.file_path.clone(),
-				source,
-			})?;
+			fs::write(&self.file_path, &bytes)
+				.await
+				.map_err(|source| J18nError::Io {
+					path: self.file_path.clone(),
+					source,
+				})?;
 
 			return Ok(());
 		}
@@ -182,13 +184,10 @@ impl I18nHashingStore {
 			}
 
 			if have_emitted_anything {
-				writer
-					.write_all(b"\n")
-					.await
-					.map_err(|source| J18nError::Io {
-						path: temp_path.clone(),
-						source,
-					})?;
+				writer.write_all(b"\n").await.map_err(|source| J18nError::Io {
+					path: temp_path.clone(),
+					source,
+				})?;
 			}
 
 			writer
@@ -458,10 +457,7 @@ mod tests {
 		let path = dir.path().join("nested").join("deep").join(".j18n-cache.ini");
 		let store = I18nHashingStore::at(&path);
 
-		store
-			.save("pt@Portuguese", &hashing_with(&[("a", "1")]))
-			.await
-			.unwrap();
+		store.save("pt@Portuguese", &hashing_with(&[("a", "1")])).await.unwrap();
 
 		assert!(path.is_file());
 	}
@@ -493,14 +489,8 @@ mod tests {
 		let path = dir.path().join(".j18n-cache.ini");
 		let store = I18nHashingStore::at(&path);
 
-		store
-			.save("a@Aymara", &hashing_with(&[("x", "x")]))
-			.await
-			.unwrap();
-		store
-			.save("z@Zulu", &hashing_with(&[("a", "OLD")]))
-			.await
-			.unwrap();
+		store.save("a@Aymara", &hashing_with(&[("x", "x")])).await.unwrap();
+		store.save("z@Zulu", &hashing_with(&[("a", "OLD")])).await.unwrap();
 		store
 			.save("z@Zulu", &hashing_with(&[("a", "NEW"), ("b", "B")]))
 			.await
@@ -569,7 +559,9 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let path = dir.path().join(".j18n-cache.ini");
 
-		fs::write(&path, "[pt@Portuguese]\nbroken-line-without-equals\n").await.unwrap();
+		fs::write(&path, "[pt@Portuguese]\nbroken-line-without-equals\n")
+			.await
+			.unwrap();
 
 		let store = I18nHashingStore::at(&path);
 
@@ -636,8 +628,14 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let store = I18nHashingStore::at(dir.path().join(".j18n-cache.ini"));
 
-		assert!(store.save("pt@Portuguese", &hashing_with(&[("a=b", "1")])).await.is_err());
-		assert!(store.save("pt@Portuguese", &hashing_with(&[("a\nb", "1")])).await.is_err());
+		assert!(store
+			.save("pt@Portuguese", &hashing_with(&[("a=b", "1")]))
+			.await
+			.is_err());
+		assert!(store
+			.save("pt@Portuguese", &hashing_with(&[("a\nb", "1")]))
+			.await
+			.is_err());
 	}
 
 	#[test]
@@ -670,7 +668,10 @@ mod tests {
 	#[test]
 	fn parse_section_header_strips_brackets() {
 		assert_eq!(parse_section_header("[a@A]"), Some("a@A"));
-		assert_eq!(parse_section_header("[locales/pt.json@Portuguese]"), Some("locales/pt.json@Portuguese"));
+		assert_eq!(
+			parse_section_header("[locales/pt.json@Portuguese]"),
+			Some("locales/pt.json@Portuguese")
+		);
 	}
 
 	#[test]

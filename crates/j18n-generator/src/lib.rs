@@ -5,7 +5,7 @@ pub use options::J18nOptions;
 use futures::stream::{self, StreamExt};
 use j18n_core::{GenerationMode, I18nData, I18nDefinition, J18nResult};
 use j18n_io::{
-	detect_indentation, content_hash_hex, read_i18n_data, write_i18n_tree_map, I18nHashing, I18nHashingStore,
+	content_hash_hex, detect_indentation, read_i18n_data, write_i18n_tree_map, I18nHashing, I18nHashingStore,
 	DEFAULT_INDENT,
 };
 use j18n_translator::{create_extrapolated_values, restore_extrapolated_values, I18nTranslator};
@@ -640,10 +640,7 @@ mod tests {
 
 		let hashing = store.load(&target_identifier(&target)).await.unwrap();
 
-		assert_eq!(
-			hashing.json_key_to_hash_map.get("a").unwrap(),
-			&content_hash_hex("A")
-		);
+		assert_eq!(hashing.json_key_to_hash_map.get("a").unwrap(), &content_hash_hex("A"));
 	}
 
 	#[tokio::test]

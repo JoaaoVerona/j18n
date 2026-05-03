@@ -57,9 +57,7 @@ pub struct InitArgs {
 
 impl InitArgs {
 	pub fn resolved_path(&self) -> PathBuf {
-		self.path
-			.clone()
-			.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE))
+		self.path.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE))
 	}
 }
 
