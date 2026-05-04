@@ -1,5 +1,5 @@
 {
-	"$schema": "https://runfile.io/schemas/v0",
+	"$schema": "https://github.com/Skiley/runfile/releases/latest/download/v0.schema.json",
 	"globals": {
 		"env": {
 			"CARGO_TARGET_DIR": "target-$(RUN.os)"
