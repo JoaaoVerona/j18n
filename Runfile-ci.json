@@ -9,7 +9,7 @@
 	"targets": {
 		"ci:build": {
 			"description": "Build all crates in release mode",
-			"commands": "cargo build --release $(ARGS)"
+			"commands": "cargo build --release {{ ARGS }}"
 		},
 		"ci:lint": {
 			"description": "Check formatting and run Clippy with warnings as errors",
