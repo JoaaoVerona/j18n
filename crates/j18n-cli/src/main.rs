@@ -627,7 +627,6 @@ mod tests {
 	async fn init_writes_skeleton_to_given_path() {
 		let dir = TempDir::new().unwrap();
 		let path = dir.path().join("config.json");
-		let original_cwd = env::current_dir().unwrap();
 
 		init(InitArgs {
 			path: Some(path.clone()),
@@ -638,8 +637,6 @@ mod tests {
 		assert!(path.exists());
 		let written = tokio::fs::read_to_string(&path).await.unwrap();
 		assert_eq!(written, SKELETON_CONFIG);
-
-		env::set_current_dir(original_cwd).unwrap();
 	}
 
 	#[tokio::test]
