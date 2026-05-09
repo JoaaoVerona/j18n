@@ -30,6 +30,7 @@ const SKELETON_CONFIG: &str = concat!(
 	"\t\"interpolationPatterns\": [],\n",
 	"\t\"parallelBatches\": 3,\n",
 	"\t\"referenceI18n\": { \"file\": \"locales/en.json\", \"language\": \"English\" },\n",
+	"\t\"retriesPerError\": 3,\n",
 	"\t\"translator\": \"claude-code\"\n",
 	"}\n",
 );
@@ -120,6 +121,7 @@ async fn resolve_config(config_path: &Path) -> Result<ResolvedConfig> {
 		hash_cache_location,
 		interpolation_patterns,
 		parallel_batches: config.parallel_batches,
+		retries_per_error: config.retries_per_error,
 	};
 
 	Ok(ResolvedConfig { config, runs, options })
@@ -538,6 +540,7 @@ mod tests {
 		));
 		assert_eq!(parsed.batch_size, 50);
 		assert_eq!(parsed.parallel_batches, 3);
+		assert_eq!(parsed.retries_per_error, 3);
 		assert!(parsed.exclude_patterns.is_empty());
 		assert!(parsed.interpolation_patterns.is_empty());
 		assert!(parsed.additional_prompts.is_empty());
@@ -686,6 +689,7 @@ mod tests {
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
 				"referenceI18n": {{ "file": "en.json", "language": "English" }},
+				"retriesPerError": 3,
 				"translator": "claude-code"
 			}}"#,
 			targets = targets.join(", "),
@@ -1124,6 +1128,7 @@ mod tests {
 				"namespaces": {namespaces_field_json},
 				"parallelBatches": 3,
 				"referenceI18n": {{ "file": "{reference_template}", "language": "English" }},
+				"retriesPerError": 3,
 				"translator": "claude-code"
 			}}"#,
 			targets = targets.join(", "),

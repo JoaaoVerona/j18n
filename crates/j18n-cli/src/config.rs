@@ -99,6 +99,9 @@ pub struct I18nToolConfig {
 	#[serde(rename = "referenceI18n")]
 	pub reference_i18n: DefinitionEntry,
 
+	#[serde(rename = "retriesPerError")]
+	pub retries_per_error: usize,
+
 	pub translator: TranslatorSelection,
 }
 
@@ -252,6 +255,7 @@ mod tests {
 			"interpolationPatterns": ["\\{\\{(.+?)\\}\\}"],
 			"parallelBatches": 3,
 			"referenceI18n": { "file": "locales/en.json", "language": "English" },
+			"retriesPerError": 3,
 			"translator": "claude-code"
 		}"#
 	}
@@ -265,6 +269,7 @@ mod tests {
 
 		assert_eq!(config.batch_size, 50);
 		assert_eq!(config.parallel_batches, 3);
+		assert_eq!(config.retries_per_error, 3);
 		assert_eq!(config.exclude_patterns, vec!["sample.**".to_string()]);
 		assert_eq!(config.interpolation_patterns, vec!["\\{\\{(.+?)\\}\\}".to_string()]);
 		assert_eq!(config.reference_i18n.file, "locales/en.json");
@@ -294,6 +299,7 @@ mod tests {
 				"hashCacheLocation": "custom/.j18n-cache.ini",
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
@@ -331,6 +337,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
@@ -354,6 +361,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": ["["],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
@@ -377,6 +385,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
@@ -400,6 +409,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 0,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
@@ -423,6 +433,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "gemini-api"
 			}"#,
@@ -449,6 +460,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "gemini-api/3.1-pro"
 			}"#,
@@ -475,6 +487,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "gemini-api/gemini-3.1-pro-preview"
 			}"#,
@@ -501,6 +514,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code/sonnet/medium"
 			}"#,
@@ -528,6 +542,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code/opus"
 			}"#,
@@ -555,6 +570,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "codex/gpt-5.1/low"
 			}"#,
@@ -582,6 +598,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "codex"
 			}"#,
@@ -609,6 +626,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "openai"
 			}"#,
@@ -633,6 +651,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code/opus/high/extra"
 			}"#,
@@ -657,6 +676,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "gemini-api/3.1-pro/high"
 			}"#,
@@ -692,6 +712,77 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_missing_retries_per_error() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let err = load_config(&path).unwrap_err();
+
+		assert!(format!("{err:#}").contains("retriesPerError"));
+	}
+
+	#[test]
+	fn parses_retries_per_error_zero_meaning_no_retries() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"retriesPerError": 0,
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert_eq!(config.retries_per_error, 0);
+	}
+
+	#[test]
+	fn parses_retries_per_error_with_custom_value() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"retriesPerError": 7,
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert_eq!(config.retries_per_error, 7);
+	}
+
+	#[test]
 	fn ignores_unknown_extra_fields() {
 		let dir = TempDir::new().unwrap();
 		let path = write_config(
@@ -704,6 +795,7 @@ mod tests {
 				"generateI18nFor": [],
 				"interpolationPatterns": [],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "en.json", "language": "English" },
 				"translator": "claude-code",
 				"mode": "SYNC",
@@ -740,6 +832,7 @@ mod tests {
 				"interpolationPatterns": [],
 				"namespaces": ["common", "auth", "checkout"],
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "locales/en/{namespace}.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
@@ -772,6 +865,7 @@ mod tests {
 				"interpolationPatterns": [],
 				"namespaces": "*",
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "locales/en/{namespace}.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,
@@ -796,6 +890,7 @@ mod tests {
 				"interpolationPatterns": [],
 				"namespaces": "auto",
 				"parallelBatches": 3,
+				"retriesPerError": 3,
 				"referenceI18n": { "file": "locales/en.json", "language": "English" },
 				"translator": "claude-code"
 			}"#,

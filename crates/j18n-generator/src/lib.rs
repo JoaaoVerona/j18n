@@ -3,7 +3,7 @@ pub mod options;
 pub use options::J18nOptions;
 
 use futures::stream::{self, StreamExt};
-use j18n_core::{GenerationMode, I18nData, I18nDefinition, J18nResult};
+use j18n_core::{GenerationMode, I18nData, I18nDefinition, J18nError, J18nResult};
 use j18n_io::{
 	content_hash_hex, detect_indentation, read_i18n_data, write_i18n_tree_map, I18nHashing, I18nHashingStore,
 	DEFAULT_INDENT,
@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub fn target_identifier(definition: &I18nDefinition) -> String {
 	format!("{}@{}", definition.id, definition.language)
@@ -282,7 +282,9 @@ where
 			let translated_count = Arc::clone(&translated_count);
 
 			async move {
-				let result = translate_batch(translator, reference_i18n, target, window, options).await;
+				let result =
+					translate_batch_with_retries(translator, reference_i18n, target, window, options, total_batches)
+						.await;
 				let current = translated_count.fetch_add(1, Ordering::SeqCst) + 1;
 
 				info!("Batch {current}/{total_batches} translated");
@@ -315,6 +317,38 @@ where
 	.await?;
 
 	Ok(entry_count)
+}
+
+async fn translate_batch_with_retries<T>(
+	translator: &T,
+	from: &I18nDefinition,
+	to: &I18nDefinition,
+	batch: Vec<(String, String)>,
+	options: &J18nOptions,
+	total_batches: usize,
+) -> J18nResult<Vec<(String, String)>>
+where
+	T: I18nTranslator + ?Sized,
+{
+	let max_attempts = options.retries_per_error.saturating_add(1);
+	let mut last_error: Option<J18nError> = None;
+
+	for attempt in 1..=max_attempts {
+		match translate_batch(translator, from, to, batch.clone(), options).await {
+			Ok(translated) => return Ok(translated),
+			Err(error) => {
+				if attempt < max_attempts {
+					warn!(
+						"Batch translation attempt {attempt}/{max_attempts} failed (out of {total_batches} total batches): {error}; retrying..."
+					);
+				}
+
+				last_error = Some(error);
+			}
+		}
+	}
+
+	Err(last_error.expect("retry loop must run at least once"))
 }
 
 async fn translate_batch<T>(
@@ -473,6 +507,7 @@ mod tests {
 			hash_cache_location: dir.path().join(".j18n-cache"),
 			interpolation_patterns: vec![Regex::new(r"\{\{(.+?)\}\}").unwrap()],
 			parallel_batches: 3,
+			retries_per_error: 0,
 		}
 	}
 
@@ -1069,6 +1104,147 @@ mod tests {
 			translator.captured_inputs().is_empty(),
 			"baseline should leave the cache fully matching the reference; no translation calls expected, got {:?}",
 			translator.captured_inputs()
+		);
+	}
+
+	struct FlakyTranslator {
+		calls: Mutex<usize>,
+		fail_first_n: usize,
+	}
+
+	impl FlakyTranslator {
+		fn new(fail_first_n: usize) -> Self {
+			Self {
+				calls: Mutex::new(0),
+				fail_first_n,
+			}
+		}
+
+		fn total_calls(&self) -> usize {
+			*self.calls.lock().unwrap()
+		}
+	}
+
+	#[async_trait]
+	impl I18nTranslator for FlakyTranslator {
+		fn translator_id(&self) -> &str {
+			"flaky"
+		}
+
+		async fn translate_values(
+			&self,
+			_from_language: &str,
+			to_language: &str,
+			values: Vec<String>,
+		) -> J18nResult<Vec<String>> {
+			let mut calls = self.calls.lock().unwrap();
+
+			*calls += 1;
+
+			if *calls <= self.fail_first_n {
+				return Err(j18n_core::J18nError::translator(format!(
+					"simulated transient error on attempt {}",
+					*calls
+				)));
+			}
+
+			Ok(values.iter().map(|v| format!("[{to_language}]{v}")).collect())
+		}
+	}
+
+	#[tokio::test]
+	async fn translate_batch_retries_on_translator_error_and_eventually_succeeds() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(&reference.file, r#"{"a": "A"}"#).await.unwrap();
+
+		let translator = FlakyTranslator::new(2);
+		let mut options = default_options(&dir);
+
+		options.retries_per_error = 3;
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Sync,
+			&options,
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(
+			translator.total_calls(),
+			3,
+			"translator should have been called 3 times: 2 failures + 1 success"
+		);
+
+		let written = read_json(&target.file).await;
+
+		assert_eq!(written["a"], "[pt]A");
+	}
+
+	#[tokio::test]
+	async fn translate_batch_gives_up_after_retries_per_error_attempts() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(&reference.file, r#"{"a": "A"}"#).await.unwrap();
+
+		let translator = FlakyTranslator::new(usize::MAX);
+		let mut options = default_options(&dir);
+
+		options.retries_per_error = 2;
+
+		let err = I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Sync,
+			&options,
+		)
+		.await
+		.unwrap_err();
+
+		assert!(matches!(err, J18nError::Translator(_)));
+		assert_eq!(
+			translator.total_calls(),
+			3,
+			"translator should have been called 3 times: 1 initial attempt + 2 retries"
+		);
+	}
+
+	#[tokio::test]
+	async fn translate_batch_with_zero_retries_only_calls_translator_once() {
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(&reference.file, r#"{"a": "A"}"#).await.unwrap();
+
+		let translator = FlakyTranslator::new(usize::MAX);
+		let options = default_options(&dir);
+
+		assert_eq!(options.retries_per_error, 0);
+
+		let err = I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Sync,
+			&options,
+		)
+		.await
+		.unwrap_err();
+
+		assert!(matches!(err, J18nError::Translator(_)));
+		assert_eq!(
+			translator.total_calls(),
+			1,
+			"with retries_per_error=0 the translator should be called exactly once"
 		);
 	}
 }

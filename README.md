@@ -83,6 +83,7 @@ Edit it to point at your locales:
     "interpolationPatterns": ["\\{\\{(.+?)\\}\\}"],
     "parallelBatches": 3,
     "referenceI18n": { "file": "locales/en.json", "language": "English" },
+    "retriesPerError": 3,
     "translator": "claude-code"
 }
 ```
@@ -147,6 +148,7 @@ file) are preserved.
 | `namespaces`             | string \| string[] *(optional)* | `"*"` to auto-discover namespaces from the reference's parent directory, or an explicit list. Required when any `file` contains `{namespace}`; forbidden otherwise. See **Namespaces**. |
 | `parallelBatches`        | integer (≥ 1)       | Max LLM batches in flight. `init` default: 3. |
 | `referenceI18n`          | object              | Source locale, same shape as a target. |
+| `retriesPerError`        | integer (≥ 0)       | How many times to retry a batch when translation fails (LLM HTTP error, mismatched interpolation count, validation failure, etc.). A value of `0` disables retries — the batch fails on the first error. `init` default: 3. |
 | `translator`             | string              | `"<kind>[/<model>[/<effort>]]"`. See **Backends**. |
 
 Paths in `referenceI18n.file`, `generateI18nFor[].file`, and
@@ -183,6 +185,7 @@ Wildcard mode — auto-discover every namespace in the reference's directory:
     "namespaces": "*",
     "parallelBatches": 3,
     "referenceI18n": { "file": "locales/en/{namespace}.json", "language": "English" },
+    "retriesPerError": 3,
     "translator": "claude-code"
 }
 ```

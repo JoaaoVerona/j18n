@@ -9,6 +9,7 @@ pub struct J18nOptions {
 	pub hash_cache_location: PathBuf,
 	pub interpolation_patterns: Vec<Regex>,
 	pub parallel_batches: usize,
+	pub retries_per_error: usize,
 }
 
 impl J18nOptions {
@@ -36,6 +37,7 @@ mod tests {
 			hash_cache_location: PathBuf::from(".j18n-cache.ini"),
 			interpolation_patterns: vec![],
 			parallel_batches,
+			retries_per_error: 0,
 		}
 	}
 
