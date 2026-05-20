@@ -55,18 +55,34 @@ rules, file layout, and what gets re-translated when.
   strings, not resolved file paths. A cache generated on Windows works on
   Linux/macOS, and vice versa.
 
-## Quick start
+## Install
 
-Build:
+npm:
 
-```sh
-cargo build --release -p j18n-cli
+```bash
+npm install -g @j18n/cli
 ```
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://github.com/Skiley/j18n/releases/latest/download/install.sh | sh
+```
+
+Windows (via PowerShell):
+
+```powershell
+iwr https://github.com/Skiley/j18n/releases/latest/download/install.ps1 | iex
+```
+
+Or build from source (see [Building from source](#building-from-source)).
+
+## Quick start
 
 Generate a config:
 
 ```sh
-./target/release/j18n init my-project.json
+j18n init
 ```
 
 Edit it to point at your locales:
@@ -91,15 +107,14 @@ Edit it to point at your locales:
 Sync:
 
 ```sh
-./target/release/j18n sync -f my-project.json
+j18n sync
 ```
 
 `pt.json` and `es.json` now contain translations of every key in `en.json`.
 Run again at any time — only entries whose `en.json` value changed (or that
 are missing in the target) are re-translated.
 
-If you name your config file `j18n.json` (the default), you can drop the
-`-f` flag entirely and just run `j18n sync`.
+By default, the file name is `j18n.json`. You can change that by specifying `-f name.json`.
 
 ## Commands
 

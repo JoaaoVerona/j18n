@@ -4,6 +4,12 @@
 /target-mac/
 /target-windows/
 
+# Release / packaging artifacts
+/stage/
+/assets/
+/npm-dist/
+/dist-artifacts/
+
 # IDE
 .idea/
 .vscode/
