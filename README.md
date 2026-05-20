@@ -150,6 +150,35 @@ translations are handled correctly. Existing cache entries for targets not
 touched by this baseline (e.g. from another config sharing the same cache
 file) are preserved.
 
+## Continuous integration
+
+Use the bundled GitHub Action to install j18n on a runner, then run `j18n
+check` to fail the build when any locale is out of sync. `check` is a dry run —
+it compares hashes only and never calls the LLM, so it needs no API key:
+
+```yaml
+name: i18n
+on: [pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Skiley/j18n/.github/actions/setup@master
+      - run: j18n check
+```
+
+The action downloads the release binary matching the runner's OS/arch
+(Linux/macOS/Windows, x64/arm64) and adds it to `PATH`. Pin `version:` to a
+specific release if you don't want `latest`:
+
+```yaml
+      - uses: Skiley/j18n/.github/actions/setup@master
+        with:
+          version: v0.2.0
+```
+
 ## Configuration
 
 | Field                    | Type                | Description |
