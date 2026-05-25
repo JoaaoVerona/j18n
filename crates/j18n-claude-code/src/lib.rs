@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use j18n_core::{J18nError, J18nResult};
+use j18n_core::{ContentFormat, J18nError, J18nResult};
 use j18n_translator::I18nTranslator;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
@@ -84,6 +84,7 @@ impl<E: ClaudeCodeExecutor> I18nTranslator for ClaudeCodeBasedI18nTranslator<E> 
 		from_language: &str,
 		to_language: &str,
 		values: Vec<String>,
+		format: ContentFormat,
 	) -> J18nResult<Vec<String>> {
 		let values_for_prompt_serialized = serde_json::to_string(&values)
 			.map_err(|e| J18nError::translator(format!("failed to serialize prompt array: {e}")))?;
@@ -92,6 +93,7 @@ impl<E: ClaudeCodeExecutor> I18nTranslator for ClaudeCodeBasedI18nTranslator<E> 
 			to_language,
 			&self.additional_prompts,
 			&self.effort,
+			format,
 			&values_for_prompt_serialized,
 		);
 		let response = self.executor.execute(&prompt).await?;
@@ -109,32 +111,61 @@ fn build_prompt(
 	to_language: &str,
 	additional_prompts: &[String],
 	effort: &str,
+	format: ContentFormat,
 	values_for_prompt_serialized: &str,
 ) -> String {
-	let mut lines: Vec<String> = vec![
-		format!("Use {effort} reasoning effort."),
-		format!("Translate the values in the following JSON array, from {from_language} to {to_language}."),
-		"DO NOT remove or modify HTML tags.".to_string(),
-		"DO NOT remove, skip or modify placeholders, like [1], [2], [3], etc.".to_string(),
-	];
+	let mut lines: Vec<String> = vec![format!("Use {effort} reasoning effort.")];
+
+	lines.extend(instruction_lines(from_language, to_language, format));
+	lines.push("DO NOT remove, skip or modify placeholders, like [1], [2], [3], etc.".to_string());
 
 	for prompt in additional_prompts {
 		lines.push(prompt.clone());
 	}
 
-	lines.extend([
-		"Once again, DO NOT remove placeholders like '[1]', '[2]', '[3]', '[4]', etc.".to_string(),
-		format!(
-			"Answer ONLY with the translated values, one per line, each separated by the exact string '{ENTRY_SEPARATOR}' on its own line, in the same order as the inputs."
-		),
-		format!(
-			"Do NOT include any other text, explanations, numbering, or formatting — only the translated values separated by '{ENTRY_SEPARATOR}'."
-		),
-		"The JSON array of values to translate is:".to_string(),
-		values_for_prompt_serialized.to_string(),
-	]);
+	lines.push("Once again, DO NOT remove placeholders like '[1]', '[2]', '[3]', '[4]', etc.".to_string());
+	lines.extend(answer_lines(format));
+	lines.push(values_for_prompt_serialized.to_string());
 
 	lines.join("\n")
+}
+
+fn instruction_lines(from_language: &str, to_language: &str, format: ContentFormat) -> Vec<String> {
+	match format {
+		ContentFormat::Json => vec![
+			format!("Translate the values in the following JSON array, from {from_language} to {to_language}."),
+			"DO NOT remove or modify HTML tags.".to_string(),
+		],
+		ContentFormat::Markdown => vec![
+			format!("Translate the Markdown/MDX document(s) in the following JSON array, from {from_language} to {to_language}."),
+			"Preserve ALL Markdown and MDX syntax exactly: headings, lists, tables, blockquotes, emphasis, and horizontal rules.".to_string(),
+			"DO NOT translate or alter fenced or inline code, code block contents, URLs, link targets, image paths, HTML/JSX tags and attributes, JSX/React component names, or import/export statements.".to_string(),
+			"For YAML front matter, translate only human-readable string values (e.g. title, description); never translate front matter keys.".to_string(),
+			"Translate only human-readable prose: headings, paragraphs, list items, table cells, link text, and image alt text.".to_string(),
+			"DO NOT add, remove, or reflow whitespace, blank lines, or indentation beyond what translating the prose itself requires.".to_string(),
+		],
+	}
+}
+
+fn answer_lines(format: ContentFormat) -> Vec<String> {
+	match format {
+		ContentFormat::Json => vec![
+			format!(
+				"Answer ONLY with the translated values, one per line, each separated by the exact string '{ENTRY_SEPARATOR}' on its own line, in the same order as the inputs."
+			),
+			format!(
+				"Do NOT include any other text, explanations, numbering, or formatting — only the translated values separated by '{ENTRY_SEPARATOR}'."
+			),
+			"The JSON array of values to translate is:".to_string(),
+		],
+		ContentFormat::Markdown => vec![
+			format!(
+				"Answer ONLY with the translated document(s), each separated by the exact string '{ENTRY_SEPARATOR}' on its own line, in the same order as the inputs."
+			),
+			"Do NOT wrap the documents in code fences and do NOT add explanations or commentary.".to_string(),
+			"The JSON array of documents to translate is:".to_string(),
+		],
+	}
 }
 
 async fn execute_claude_code(model: &str, prompt: &str) -> J18nResult<String> {
@@ -245,7 +276,12 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		let translated = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["hello".into(), "world".into()])
+			.translate_values(
+				ENGLISH,
+				PORTUGUESE,
+				vec!["hello".into(), "world".into()],
+				ContentFormat::Json,
+			)
 			.await
 			.unwrap();
 
@@ -259,7 +295,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		let translated = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["Hello [0]!".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hello [0]!".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -272,7 +308,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		let err = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["a".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["a".into()], ContentFormat::Json)
 			.await
 			.unwrap_err();
 
@@ -288,7 +324,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -306,7 +342,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -322,7 +358,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor).with_effort("medium");
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -339,7 +375,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -368,7 +404,7 @@ mod tests {
 			.with_additional_prompts(vec!["INJECTED-CONTEXT-A".to_string(), "INJECTED-CONTEXT-B".to_string()]);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -394,7 +430,7 @@ mod tests {
 		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -403,5 +439,51 @@ mod tests {
 
 		assert!(prompt.contains("DO NOT remove, skip or modify placeholders"));
 		assert!(prompt.contains("Once again, DO NOT remove placeholders"));
+	}
+
+	#[tokio::test]
+	async fn markdown_prompt_instructs_to_preserve_syntax_and_omits_json_array_framing() {
+		let (executor, captured) = MockExecutor::ok("# Olá");
+		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor);
+
+		translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["# Hi".into()], ContentFormat::Markdown)
+			.await
+			.unwrap();
+
+		let prompts = captured.lock().unwrap();
+		let prompt = &prompts[0];
+
+		assert!(prompt.contains("Translate the Markdown/MDX document(s)"));
+		assert!(prompt.contains("Preserve ALL Markdown and MDX syntax"));
+		assert!(prompt.contains("never translate front matter keys"));
+		assert!(prompt.contains("Do NOT wrap the documents in code fences"));
+		// Markdown mode must not reuse the JSON-string framing that tells the model to strip formatting.
+		assert!(!prompt.contains("Translate the values in the following JSON array"));
+		assert!(!prompt.contains("or formatting — only the translated values"));
+		// The placeholder guardrails are shared across formats.
+		assert!(prompt.contains("DO NOT remove, skip or modify placeholders"));
+		assert!(prompt.contains(ENTRY_SEPARATOR));
+	}
+
+	#[tokio::test]
+	async fn markdown_additional_prompts_still_injected_between_placeholder_warnings() {
+		let (executor, captured) = MockExecutor::ok("X");
+		let translator = ClaudeCodeBasedI18nTranslator::with_executor(executor)
+			.with_additional_prompts(vec!["GLOSSARY-RULE".to_string()]);
+
+		translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Markdown)
+			.await
+			.unwrap();
+
+		let prompts = captured.lock().unwrap();
+		let prompt = &prompts[0];
+		let first_warning = prompt.find("DO NOT remove, skip or modify placeholders").unwrap();
+		let injected = prompt.find("GLOSSARY-RULE").unwrap();
+		let reminder = prompt.find("Once again, DO NOT remove placeholders").unwrap();
+
+		assert!(first_warning < injected);
+		assert!(injected < reminder);
 	}
 }

@@ -118,6 +118,7 @@ async fn resolve_config(config_path: &Path) -> Result<ResolvedConfig> {
 	let options = J18nOptions {
 		batch_size: config.batch_size,
 		exclude_patterns,
+		format: config.format,
 		hash_cache_location,
 		interpolation_patterns,
 		parallel_batches: config.parallel_batches,
@@ -237,6 +238,7 @@ async fn run(args: CommandArgs, mode: GenerationMode) -> Result<()> {
 				&resolved_run.generated_i18ns,
 				&resolved.options.exclude_patterns,
 				&resolved.options.interpolation_patterns,
+				resolved.options.format,
 			)
 			.await?;
 		}

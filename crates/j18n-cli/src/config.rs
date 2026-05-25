@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use j18n_core::PathPattern;
+use j18n_core::{ContentFormat, PathPattern};
 use j18n_translator::compile_interpolation_patterns;
 use serde::de::{self, Deserializer, Visitor};
 use serde::Deserialize;
@@ -80,6 +80,12 @@ pub struct I18nToolConfig {
 
 	#[serde(rename = "excludePatterns")]
 	pub exclude_patterns: Vec<String>,
+
+	/// What kind of files the reference/targets are. `"json"` (default) flattens
+	/// i18n JSON objects into keyed entries; `"markdown"` translates whole
+	/// Markdown/MDX documents while preserving their syntax.
+	#[serde(rename = "format", default)]
+	pub format: ContentFormat,
 
 	#[serde(rename = "generateI18nFor")]
 	pub generate_i18n_for: Vec<DefinitionEntry>,
@@ -636,6 +642,64 @@ mod tests {
 		let text = format!("{err:#}");
 
 		assert!(text.contains("claude-code") && text.contains("gemini-api") && text.contains("codex"));
+	}
+
+	#[test]
+	fn format_defaults_to_json_when_absent() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(&dir, "a.json", full_config_json());
+
+		let config = load_config(&path).unwrap();
+
+		assert_eq!(config.format, ContentFormat::Json);
+	}
+
+	#[test]
+	fn parses_markdown_format() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"format": "markdown",
+				"generateI18nFor": [{ "file": "i18n/pt/welcome.mdx", "language": "Brazilian Portuguese" }],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"retriesPerError": 3,
+				"referenceI18n": { "file": "docs/welcome.mdx", "language": "English" },
+				"translator": "claude-code"
+			}"#,
+		);
+
+		let config = load_config(&path).unwrap();
+
+		assert_eq!(config.format, ContentFormat::Markdown);
+	}
+
+	#[test]
+	fn rejects_unknown_format_value() {
+		let dir = TempDir::new().unwrap();
+		let path = write_config(
+			&dir,
+			"a.json",
+			r#"{
+				"additionalPrompts": [],
+				"batchSize": 50,
+				"excludePatterns": [],
+				"format": "yaml",
+				"generateI18nFor": [],
+				"interpolationPatterns": [],
+				"parallelBatches": 3,
+				"retriesPerError": 3,
+				"referenceI18n": { "file": "en.json", "language": "English" },
+				"translator": "claude-code"
+			}"#,
+		);
+
+		assert!(load_config(&path).is_err());
 	}
 
 	#[test]

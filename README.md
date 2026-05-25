@@ -31,6 +31,10 @@ rules, file layout, and what gets re-translated when.
   `locales/{lang}/{namespace}.json` layout (or any layout with a
   `{namespace}` token in the path) and j18n handles every namespace in one
   run. Namespaces can be listed explicitly or auto-discovered with `"*"`.
+- **JSON or Markdown** — translate i18n JSON dictionaries or whole
+  Markdown/MDX documents (`"format": "markdown"`), the latter preserving all
+  Markdown/MDX syntax and front-matter keys while only re-translating a
+  document when its source changes. See **Formats**.
 - **Pluggable backends** — Claude Code (the local `claude` CLI), the Gemini
   HTTP API, or Codex CLI (the local `codex` CLI). Each backend lets you pick
   the model, and the CLI-based ones also let you pick a reasoning effort
@@ -186,6 +190,7 @@ specific release if you don't want `latest`:
 | `additionalPrompts`      | string[]            | Extra prompt lines — domain context, glossary rules — inserted between the placeholder warnings in the LLM prompt. |
 | `batchSize`              | integer (≥ 1)       | Entries per LLM call. `init` default: 50. |
 | `excludePatterns`        | string[]            | Glob patterns of dot-separated keys to skip. See **Patterns**. |
+| `format`                 | string *(optional)* | `"json"` (default) or `"markdown"`. Picks how files are parsed and written. See **Formats**. |
 | `generateI18nFor`        | object[]            | Target locales: `{ "file": "...", "language": "..." }`. |
 | `hashCacheLocation`      | string *(optional)* | Override where the cache file lives. Defaults to `.j18n-cache.ini` in the reference file's directory (or the deepest fixed-prefix directory when using namespaces). |
 | `interpolationPatterns`  | string[]            | Regexes matching substrings to preserve verbatim through translation. See **Patterns**. |
@@ -287,6 +292,57 @@ Saves rewrite the file via a temp + atomic rename, so an interrupted save
 never leaves the cache in a half-written state. Target ids must not
 contain `[`, `]`, or newlines; cache keys must not contain `=` or
 newlines — j18n validates this at write time.
+
+## Formats
+
+The `format` field selects how each file is parsed into translatable entries
+and written back. Everything else — incremental sync, the hash cache, batching,
+parallelism, retries, namespaces, exclude/interpolation patterns, and the
+backends — works the same regardless of format.
+
+### `json`
+
+The original behavior: a reference JSON object is flattened into dotted-key
+entries (`section.button.ok`), each string value translated independently, and
+the target is rebuilt as sorted, pretty-printed JSON. Non-string values are
+left untouched.
+
+### `markdown`
+
+Each Markdown/MDX file is treated as **one entry whose value is the whole
+document**. The target is written verbatim (with a single trailing newline),
+not reserialized — there's no flattening, sorting, or pruning. The prompt is
+swapped for a document-translation prompt that instructs the model to preserve
+all Markdown/MDX syntax (code fences, inline code, URLs, link targets, image
+paths, HTML/JSX tags and component names, import/export lines) and front-matter
+keys, translating only human-readable prose, headings, link text, and alt text.
+
+Because a file is a single entry, the incremental cache re-translates a document
+only when its source content changes, and `batchSize` is effectively one
+document per call. Configure `interpolationPatterns` to additionally hard-lock
+any substrings you never want touched (they are extracted to neutral `[N]`
+markers before the prompt and restored after, with integrity validated).
+
+Pair `markdown` with namespaces to translate a whole docs tree in one run — for
+example, feeding a Docusaurus `i18n/<locale>/.../current/` layout:
+
+```jsonc
+{
+    "additionalPrompts": [],
+    "batchSize": 1,
+    "excludePatterns": [],
+    "format": "markdown",
+    "generateI18nFor": [
+        { "file": "i18n/pt-BR/docusaurus-plugin-content-docs/current/{namespace}.mdx", "language": "Brazilian Portuguese" }
+    ],
+    "interpolationPatterns": [],
+    "namespaces": "*",
+    "parallelBatches": 3,
+    "referenceI18n": { "file": "docs/{namespace}.mdx", "language": "English" },
+    "retriesPerError": 3,
+    "translator": "claude-code"
+}
+```
 
 ## Backends
 

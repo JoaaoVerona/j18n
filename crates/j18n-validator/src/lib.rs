@@ -1,4 +1,4 @@
-use j18n_core::{I18nData, I18nDefinition, J18nError, J18nResult, PathPattern};
+use j18n_core::{ContentFormat, I18nData, I18nDefinition, J18nError, J18nResult, PathPattern};
 use j18n_io::read_i18n_data;
 use regex::Regex;
 use std::collections::HashMap;
@@ -12,8 +12,9 @@ impl TranslationValidator {
 		generated_i18ns: &[I18nDefinition],
 		exclude_patterns: &[PathPattern],
 		interpolation_patterns: &[Regex],
+		format: ContentFormat,
 	) -> J18nResult<()> {
-		let reference_data = read_i18n_data(reference_i18n, exclude_patterns).await?;
+		let reference_data = read_i18n_data(reference_i18n, exclude_patterns, format).await?;
 
 		for generated in generated_i18ns {
 			debug!(
@@ -24,7 +25,7 @@ impl TranslationValidator {
 				reference_i18n.file.display()
 			);
 
-			let generated_data = read_i18n_data(generated, exclude_patterns).await?;
+			let generated_data = read_i18n_data(generated, exclude_patterns, format).await?;
 
 			Self::validate_data(&reference_data, &generated_data, interpolation_patterns)?;
 		}
@@ -192,7 +193,7 @@ mod tests {
 		tokio::fs::write(&reference.file, r#"{"a": "x"}"#).await.unwrap();
 		tokio::fs::write(&generated.file, r#"{"a": "y"}"#).await.unwrap();
 
-		TranslationValidator::validate_translations(&reference, &[generated], &[], &handlebars())
+		TranslationValidator::validate_translations(&reference, &[generated], &[], &handlebars(), ContentFormat::Json)
 			.await
 			.unwrap();
 	}
@@ -208,9 +209,15 @@ mod tests {
 			.unwrap();
 		tokio::fs::write(&generated.file, r#"{"a": "z"}"#).await.unwrap();
 
-		let err = TranslationValidator::validate_translations(&reference, &[generated], &[], &handlebars())
-			.await
-			.unwrap_err();
+		let err = TranslationValidator::validate_translations(
+			&reference,
+			&[generated],
+			&[],
+			&handlebars(),
+			ContentFormat::Json,
+		)
+		.await
+		.unwrap_err();
 
 		match err {
 			J18nError::MissingTranslation { key } => assert_eq!(key, "b"),
@@ -231,9 +238,67 @@ mod tests {
 
 		let exclude = vec![PathPattern::parse("sample").unwrap()];
 
-		TranslationValidator::validate_translations(&reference, &[generated], &exclude, &handlebars())
-			.await
-			.unwrap();
+		TranslationValidator::validate_translations(
+			&reference,
+			&[generated],
+			&exclude,
+			&handlebars(),
+			ContentFormat::Json,
+		)
+		.await
+		.unwrap();
+	}
+
+	fn markdown_definition_in(dir: &TempDir, name: &str) -> I18nDefinition {
+		let file = dir.path().join(format!("{name}.mdx"));
+
+		I18nDefinition {
+			file,
+			id: format!("{name}.mdx"),
+			language: name.to_string(),
+		}
+	}
+
+	#[tokio::test]
+	async fn validate_translations_passes_for_present_markdown_document() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let generated = markdown_definition_in(&dir, "pt");
+
+		tokio::fs::write(&reference.file, "# Hi\n").await.unwrap();
+		tokio::fs::write(&generated.file, "# Olá\n").await.unwrap();
+
+		TranslationValidator::validate_translations(
+			&reference,
+			&[generated],
+			&[],
+			&handlebars(),
+			ContentFormat::Markdown,
+		)
+		.await
+		.unwrap();
+	}
+
+	#[tokio::test]
+	async fn validate_translations_errors_when_markdown_target_is_empty() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let generated = markdown_definition_in(&dir, "pt");
+
+		tokio::fs::write(&reference.file, "# Hi\n").await.unwrap();
+		tokio::fs::write(&generated.file, "").await.unwrap();
+
+		let err = TranslationValidator::validate_translations(
+			&reference,
+			&[generated],
+			&[],
+			&handlebars(),
+			ContentFormat::Markdown,
+		)
+		.await
+		.unwrap_err();
+
+		assert!(matches!(err, J18nError::MissingTranslation { .. }));
 	}
 
 	#[test]

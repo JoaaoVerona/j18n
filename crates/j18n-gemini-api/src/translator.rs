@@ -1,6 +1,6 @@
 use crate::model::{GeminiContent, GeminiPart, GenerateContentRequest, GenerateContentResponse, GenerationConfig};
 use async_trait::async_trait;
-use j18n_core::{J18nError, J18nResult};
+use j18n_core::{ContentFormat, J18nError, J18nResult};
 use j18n_translator::I18nTranslator;
 use reqwest::Client;
 use std::time::Duration;
@@ -171,10 +171,11 @@ impl<T: GeminiTransport> I18nTranslator for GeminiApiI18nTranslator<T> {
 		from_language: &str,
 		to_language: &str,
 		values: Vec<String>,
+		format: ContentFormat,
 	) -> J18nResult<Vec<String>> {
 		let values_for_prompt_serialized = serde_json::to_string(&values)
 			.map_err(|e| J18nError::translator(format!("failed to serialize prompt array: {e}")))?;
-		let prompt = build_prompt(from_language, to_language, &self.additional_prompts);
+		let prompt = build_prompt(from_language, to_language, &self.additional_prompts, format);
 		let response_text = self.complete_chat(vec![prompt, values_for_prompt_serialized]).await?;
 		let parsed: Vec<String> = serde_json::from_str(response_text.trim()).map_err(|e| {
 			J18nError::translator(format!(
@@ -186,26 +187,58 @@ impl<T: GeminiTransport> I18nTranslator for GeminiApiI18nTranslator<T> {
 	}
 }
 
-fn build_prompt(from_language: &str, to_language: &str, additional_prompts: &[String]) -> String {
-	let mut lines: Vec<String> = vec![
-		format!("Translate the values in the following JSON array, from {from_language} to {to_language}."),
-		"DO NOT remove or modify HTML tags.".to_string(),
-		"DO NOT remove, skip or modify placeholders, like [1], [2], [3], etc.".to_string(),
-	];
+fn build_prompt(
+	from_language: &str,
+	to_language: &str,
+	additional_prompts: &[String],
+	format: ContentFormat,
+) -> String {
+	let mut lines: Vec<String> = instruction_lines(from_language, to_language, format);
+
+	lines.push("DO NOT remove, skip or modify placeholders, like [1], [2], [3], etc.".to_string());
 
 	for prompt in additional_prompts {
 		lines.push(prompt.clone());
 	}
 
-	lines.extend([
-		"Once again, DO NOT remove placeholders like '[1]', '[2]', '[3]', '[4]', etc.".to_string(),
-		"Answer ONLY with a JSON array containing string elements, one for each translated value, in the same order as their inputs.".to_string(),
-		"Do NOT embed the JSON array in Markdown, do NOT write '```json' or equivalents.".to_string(),
-		"Answer with a JSON array directly.".to_string(),
-		"The JSON array is:".to_string(),
-	]);
+	lines.push("Once again, DO NOT remove placeholders like '[1]', '[2]', '[3]', '[4]', etc.".to_string());
+	lines.extend(answer_lines(format));
 
 	lines.join("\n")
+}
+
+fn instruction_lines(from_language: &str, to_language: &str, format: ContentFormat) -> Vec<String> {
+	match format {
+		ContentFormat::Json => vec![
+			format!("Translate the values in the following JSON array, from {from_language} to {to_language}."),
+			"DO NOT remove or modify HTML tags.".to_string(),
+		],
+		ContentFormat::Markdown => vec![
+			format!("Translate the Markdown/MDX document(s) in the following JSON array, from {from_language} to {to_language}."),
+			"Preserve ALL Markdown and MDX syntax exactly: headings, lists, tables, blockquotes, emphasis, and horizontal rules.".to_string(),
+			"DO NOT translate or alter fenced or inline code, code block contents, URLs, link targets, image paths, HTML/JSX tags and attributes, JSX/React component names, or import/export statements.".to_string(),
+			"For YAML front matter, translate only human-readable string values (e.g. title, description); never translate front matter keys.".to_string(),
+			"Translate only human-readable prose: headings, paragraphs, list items, table cells, link text, and image alt text.".to_string(),
+			"DO NOT add, remove, or reflow whitespace, blank lines, or indentation beyond what translating the prose itself requires.".to_string(),
+		],
+	}
+}
+
+fn answer_lines(format: ContentFormat) -> Vec<String> {
+	match format {
+		ContentFormat::Json => vec![
+			"Answer ONLY with a JSON array containing string elements, one for each translated value, in the same order as their inputs.".to_string(),
+			"Do NOT embed the JSON array in Markdown, do NOT write '```json' or equivalents.".to_string(),
+			"Answer with a JSON array directly.".to_string(),
+			"The JSON array is:".to_string(),
+		],
+		ContentFormat::Markdown => vec![
+			"Answer ONLY with a JSON array of strings, one fully translated document per element, in the same order as their inputs.".to_string(),
+			"Each element must be the entire translated document encoded as a single JSON string (newlines escaped as \\n).".to_string(),
+			"Do NOT wrap the array or any element in a Markdown code fence; do NOT write '```json', '```', or any commentary.".to_string(),
+			"The JSON array of documents is:".to_string(),
+		],
+	}
 }
 
 #[cfg(test)]
@@ -304,7 +337,12 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		let translated = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["hello".into(), "world".into()])
+			.translate_values(
+				ENGLISH,
+				PORTUGUESE,
+				vec!["hello".into(), "world".into()],
+				ContentFormat::Json,
+			)
 			.await
 			.unwrap();
 
@@ -317,7 +355,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -332,7 +370,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport).with_model_name("custom-model");
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -346,7 +384,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi [0]".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["Hi [0]".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -365,7 +403,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		let err = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap_err();
 
@@ -377,7 +415,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(MockTransport::err());
 
 		let err = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap_err();
 
@@ -405,7 +443,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(EmptyTransport);
 
 		let err = translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap_err();
 
@@ -421,7 +459,7 @@ mod tests {
 		let translator = GeminiApiI18nTranslator::with_transport(transport);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -451,7 +489,7 @@ mod tests {
 			.with_additional_prompts(vec!["INJECTED-CONTEXT-A".to_string(), "INJECTED-CONTEXT-B".to_string()]);
 
 		translator
-			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()])
+			.translate_values(ENGLISH, PORTUGUESE, vec!["x".into()], ContentFormat::Json)
 			.await
 			.unwrap();
 
@@ -469,5 +507,26 @@ mod tests {
 		assert!(placeholder_position < injected_a_position);
 		assert!(injected_a_position < injected_b_position);
 		assert!(injected_b_position < reminder_position);
+	}
+
+	#[tokio::test]
+	async fn markdown_prompt_preserves_syntax_and_keeps_json_array_response_contract() {
+		let (transport, captured) = MockTransport::ok(r##"["# Olá\n"]"##);
+		let translator = GeminiApiI18nTranslator::with_transport(transport);
+
+		let translated = translator
+			.translate_values(ENGLISH, PORTUGUESE, vec!["# Hi\n".into()], ContentFormat::Markdown)
+			.await
+			.unwrap();
+
+		assert_eq!(translated, vec!["# Olá\n".to_string()]);
+
+		let captured = captured.lock().unwrap();
+		let prompt = &captured[0].messages[0];
+
+		assert!(prompt.contains("Translate the Markdown/MDX document(s)"));
+		assert!(prompt.contains("Preserve ALL Markdown and MDX syntax"));
+		assert!(prompt.contains("one fully translated document per element"));
+		assert!(!prompt.contains("Translate the values in the following JSON array"));
 	}
 }

@@ -6,7 +6,7 @@ pub const DEFAULT_CONFIG_FILE: &str = "j18n.json";
 #[derive(Debug, Parser)]
 #[command(
 	name = "j18n",
-	about = "Generate or sync localized i18n JSON files from a reference language using LLMs.",
+	about = "Generate or sync localized i18n JSON dictionaries or Markdown/MDX documents from a reference language using LLMs.",
 	version
 )]
 pub struct Cli {

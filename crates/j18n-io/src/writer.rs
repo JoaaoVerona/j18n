@@ -55,6 +55,43 @@ pub async fn write_i18n_tree_map(
 	Ok(())
 }
 
+/// Writes a translated Markdown/MDX document verbatim to the target file,
+/// creating parent directories as needed. The body is written as-is except that
+/// a single trailing newline is guaranteed (POSIX-text convention) — translator
+/// backends trim their output, so this restores the customary final newline
+/// without appending blank lines.
+pub async fn write_markdown_file(definition: &I18nDefinition, body: &str) -> J18nResult<()> {
+	if let Some(parent) = definition.file.parent() {
+		if !parent.as_os_str().is_empty() {
+			fs::create_dir_all(parent).await.map_err(|source| J18nError::Io {
+				path: parent.to_path_buf(),
+				source,
+			})?;
+		}
+	}
+
+	let mut file = fs::File::create(&definition.file)
+		.await
+		.map_err(|source| J18nError::Io {
+			path: definition.file.clone(),
+			source,
+		})?;
+
+	file.write_all(body.as_bytes()).await.map_err(|source| J18nError::Io {
+		path: definition.file.clone(),
+		source,
+	})?;
+
+	if !body.ends_with('\n') {
+		file.write_all(b"\n").await.map_err(|source| J18nError::Io {
+			path: definition.file.clone(),
+			source,
+		})?;
+	}
+
+	Ok(())
+}
+
 fn change_i18n_property(mut json: Map<String, Value>, key_dot_separated: &str, value: &str) -> Map<String, Value> {
 	if let Some((this_part, rest_parts)) = key_dot_separated.split_once('.') {
 		let sub_json = match json.remove(this_part) {
@@ -339,5 +376,78 @@ mod tests {
 			.unwrap();
 
 		assert!(definition.file.exists());
+	}
+
+	fn markdown_definition_in(dir: &TempDir, name: &str) -> I18nDefinition {
+		let file = dir.path().join(format!("{name}.mdx"));
+
+		I18nDefinition {
+			file,
+			id: format!("{name}.mdx"),
+			language: name.to_string(),
+		}
+	}
+
+	#[tokio::test]
+	async fn markdown_writes_body_verbatim_when_it_already_ends_with_newline() {
+		let dir = TempDir::new().unwrap();
+		let definition = markdown_definition_in(&dir, "pt");
+		let body = "# Título\n\nUm parágrafo com `code`.\n";
+
+		write_markdown_file(&definition, body).await.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+
+		assert_eq!(written, body);
+	}
+
+	#[tokio::test]
+	async fn markdown_appends_single_trailing_newline_when_missing() {
+		let dir = TempDir::new().unwrap();
+		let definition = markdown_definition_in(&dir, "pt");
+
+		write_markdown_file(&definition, "# Título").await.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+
+		assert_eq!(written, "# Título\n");
+	}
+
+	#[tokio::test]
+	async fn markdown_does_not_add_extra_newline_when_already_present() {
+		let dir = TempDir::new().unwrap();
+		let definition = markdown_definition_in(&dir, "pt");
+
+		write_markdown_file(&definition, "line\n").await.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+
+		assert_eq!(written, "line\n");
+	}
+
+	#[tokio::test]
+	async fn markdown_creates_parent_directories_when_missing() {
+		let dir = TempDir::new().unwrap();
+		let definition = I18nDefinition {
+			file: dir.path().join("i18n/pt-BR/current/welcome.mdx"),
+			id: "i18n/pt-BR/current/welcome.mdx".to_string(),
+			language: "Brazilian Portuguese".to_string(),
+		};
+
+		write_markdown_file(&definition, "# Olá\n").await.unwrap();
+
+		assert!(definition.file.exists());
+		assert_eq!(fs::read_to_string(&definition.file).await.unwrap(), "# Olá\n");
+	}
+
+	#[tokio::test]
+	async fn markdown_overwrites_existing_target() {
+		let dir = TempDir::new().unwrap();
+		let definition = markdown_definition_in(&dir, "pt");
+
+		fs::write(&definition.file, "old content\n").await.unwrap();
+		write_markdown_file(&definition, "new content\n").await.unwrap();
+
+		assert_eq!(fs::read_to_string(&definition.file).await.unwrap(), "new content\n");
 	}
 }

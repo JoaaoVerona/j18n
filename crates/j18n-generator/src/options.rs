@@ -1,4 +1,4 @@
-use j18n_core::PathPattern;
+use j18n_core::{ContentFormat, PathPattern};
 use regex::Regex;
 use std::path::PathBuf;
 
@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub struct J18nOptions {
 	pub batch_size: usize,
 	pub exclude_patterns: Vec<PathPattern>,
+	pub format: ContentFormat,
 	pub hash_cache_location: PathBuf,
 	pub interpolation_patterns: Vec<Regex>,
 	pub parallel_batches: usize,
@@ -34,6 +35,7 @@ mod tests {
 		J18nOptions {
 			batch_size,
 			exclude_patterns: vec![],
+			format: ContentFormat::Json,
 			hash_cache_location: PathBuf::from(".j18n-cache.ini"),
 			interpolation_patterns: vec![],
 			parallel_batches,

@@ -3,10 +3,10 @@ pub mod options;
 pub use options::J18nOptions;
 
 use futures::stream::{self, StreamExt};
-use j18n_core::{GenerationMode, I18nData, I18nDefinition, J18nError, J18nResult};
+use j18n_core::{ContentFormat, GenerationMode, I18nData, I18nDefinition, J18nError, J18nResult};
 use j18n_io::{
-	content_hash_hex, detect_indentation, read_i18n_data, write_i18n_tree_map, I18nHashing, I18nHashingStore,
-	DEFAULT_INDENT,
+	content_hash_hex, detect_indentation, read_i18n_data, write_i18n_tree_map, write_markdown_file, I18nHashing,
+	I18nHashingStore, DEFAULT_INDENT,
 };
 use j18n_translator::{create_extrapolated_values, restore_extrapolated_values, I18nTranslator};
 use j18n_validator::TranslationValidator;
@@ -102,7 +102,7 @@ impl I18nGenerator {
 	where
 		T: I18nTranslator + ?Sized,
 	{
-		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns).await?;
+		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns, options.format).await?;
 		let reference_hashing = I18nHashing::from_i18n_data(&reference_data);
 		let store = I18nHashingStore::at(&options.hash_cache_location);
 
@@ -182,7 +182,7 @@ impl I18nGenerator {
 		generate_i18n_for: &[I18nDefinition],
 		options: &J18nOptions,
 	) -> J18nResult<usize> {
-		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns).await?;
+		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns, options.format).await?;
 		let store = I18nHashingStore::at(&options.hash_cache_location);
 
 		debug!(
@@ -193,7 +193,7 @@ impl I18nGenerator {
 		);
 
 		for target in generate_i18n_for {
-			let target_data = read_i18n_data(target, &options.exclude_patterns).await?;
+			let target_data = read_i18n_data(target, &options.exclude_patterns, options.format).await?;
 			let target_keys: BTreeSet<&str> = target_data
 				.walked_tree_map
 				.iter()
@@ -226,7 +226,7 @@ impl I18nGenerator {
 		generate_i18n_for: &[I18nDefinition],
 		options: &J18nOptions,
 	) -> J18nResult<CheckReport> {
-		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns).await?;
+		let reference_data = read_i18n_data(reference_i18n, &options.exclude_patterns, options.format).await?;
 		let reference_hashing = I18nHashing::from_i18n_data(&reference_data);
 		let store = I18nHashingStore::at(&options.hash_cache_location);
 		let reference_entries = reference_data.walked_tree_map.len();
@@ -248,7 +248,7 @@ impl I18nGenerator {
 				let target_id = target_identifier(target);
 				let cached_hashing = store.load(&target_id).await?;
 				let changed_keys = cached_hashing.compute_changed_keys(reference_hashing);
-				let target_data = read_i18n_data(target, &options.exclude_patterns).await?;
+				let target_data = read_i18n_data(target, &options.exclude_patterns, options.format).await?;
 				let plan = compute_sync_plan(reference_data, &target_data, &changed_keys, GenerationMode::Sync);
 
 				debug!(
@@ -294,7 +294,7 @@ async fn translate_into_target<T>(
 where
 	T: I18nTranslator + ?Sized,
 {
-	let target_data = read_i18n_data(target, &options.exclude_patterns).await?;
+	let target_data = read_i18n_data(target, &options.exclude_patterns, options.format).await?;
 	let plan = compute_sync_plan(reference_data, &target_data, changed_keys_since_last_hashing, mode);
 	let entries_to_translate = plan.entries_to_translate;
 	let entry_count = entries_to_translate.len();
@@ -336,22 +336,38 @@ where
 	let translated_batches: Vec<Vec<(String, String)>> =
 		translated_batches.into_iter().collect::<J18nResult<Vec<_>>>()?;
 
-	debug!("Writing ({mode}) JSON to \"{}\"...", target.file.display());
+	match options.format {
+		ContentFormat::Json => {
+			debug!("Writing ({mode}) JSON to \"{}\"...", target.file.display());
 
-	let initial_json_dict: Map<String, Value> = match mode {
-		GenerationMode::Regenerate => reference_data.json_dict.clone(),
-		GenerationMode::Sync => merge_json_objects(&reference_data.json_dict, &target_data.json_dict),
-	};
-	let indent = resolve_indent(target, reference_i18n, mode).await?;
+			let initial_json_dict: Map<String, Value> = match mode {
+				GenerationMode::Regenerate => reference_data.json_dict.clone(),
+				GenerationMode::Sync => merge_json_objects(&reference_data.json_dict, &target_data.json_dict),
+			};
+			let indent = resolve_indent(target, reference_i18n, mode).await?;
 
-	write_i18n_tree_map(
-		target,
-		indent.as_bytes(),
-		&reference_data.json_dict,
-		initial_json_dict,
-		&translated_batches,
-	)
-	.await?;
+			write_i18n_tree_map(
+				target,
+				indent.as_bytes(),
+				&reference_data.json_dict,
+				initial_json_dict,
+				&translated_batches,
+			)
+			.await?;
+		}
+		ContentFormat::Markdown => {
+			// A Markdown file maps to a single entry, so there is at most one
+			// translated value to write. When nothing changed (sync) the batches
+			// are empty and the existing translation is left untouched.
+			for batch in &translated_batches {
+				for (_key, value) in batch {
+					debug!("Writing ({mode}) Markdown to \"{}\"...", target.file.display());
+
+					write_markdown_file(target, value).await?;
+				}
+			}
+		}
+	}
 
 	Ok(entry_count)
 }
@@ -409,7 +425,7 @@ where
 	let extrapolated = create_extrapolated_values(&batch_values, &options.interpolation_patterns);
 	let extrapolated_strings: Vec<String> = extrapolated.iter().map(|e| e.extrapolated_value.clone()).collect();
 	let translated_extrapolated = translator
-		.translate_values(&from.language, &to.language, extrapolated_strings)
+		.translate_values(&from.language, &to.language, extrapolated_strings, options.format)
 		.await?;
 	let translated_values = restore_extrapolated_values(&extrapolated, &translated_extrapolated)?;
 
@@ -499,6 +515,7 @@ mod tests {
 			from_language: &str,
 			to_language: &str,
 			values: Vec<String>,
+			_format: ContentFormat,
 		) -> J18nResult<Vec<String>> {
 			self.captured
 				.lock()
@@ -541,6 +558,7 @@ mod tests {
 		J18nOptions {
 			batch_size: 50,
 			exclude_patterns: vec![],
+			format: ContentFormat::Json,
 			hash_cache_location: dir.path().join(".j18n-cache"),
 			interpolation_patterns: vec![Regex::new(r"\{\{(.+?)\}\}").unwrap()],
 			parallel_batches: 3,
@@ -1216,6 +1234,7 @@ mod tests {
 			_from_language: &str,
 			to_language: &str,
 			values: Vec<String>,
+			_format: ContentFormat,
 		) -> J18nResult<Vec<String>> {
 			let mut calls = self.calls.lock().unwrap();
 
@@ -1325,6 +1344,199 @@ mod tests {
 			translator.total_calls(),
 			1,
 			"with retries_per_error=0 the translator should be called exactly once"
+		);
+	}
+
+	fn markdown_definition_in(dir: &TempDir, name: &str) -> I18nDefinition {
+		let file = dir.path().join(format!("{name}.mdx"));
+
+		I18nDefinition {
+			file,
+			id: format!("{name}.mdx"),
+			language: name.to_string(),
+		}
+	}
+
+	fn markdown_options(dir: &TempDir) -> J18nOptions {
+		let mut options = default_options(dir);
+
+		options.format = ContentFormat::Markdown;
+		options
+	}
+
+	#[tokio::test]
+	async fn markdown_regenerate_writes_translated_document_to_target() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let target = markdown_definition_in(&dir, "pt");
+		let body = "# Welcome\n\nUse `j18n` to translate.\n";
+
+		fs::write(&reference.file, body).await.unwrap();
+
+		let translator = MockTranslator::default();
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Regenerate,
+			&markdown_options(&dir),
+		)
+		.await
+		.unwrap();
+
+		// The whole document is sent as a single value.
+		assert_eq!(translator.captured_inputs(), vec![body.to_string()]);
+
+		let written = fs::read_to_string(&target.file).await.unwrap();
+		assert_eq!(written, format!("[pt]{body}"));
+	}
+
+	#[tokio::test]
+	async fn markdown_sync_skips_translation_and_write_when_unchanged() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let target = markdown_definition_in(&dir, "pt");
+		let body = "# Welcome\n";
+
+		fs::write(&reference.file, body).await.unwrap();
+		fs::write(&target.file, "# Bem-vindo (existing)\n").await.unwrap();
+
+		// Prime the cache so the reference's single entry is considered already synced.
+		let store = I18nHashingStore::at(&markdown_options(&dir).hash_cache_location);
+		let mut hashes = HashMap::new();
+		hashes.insert(j18n_core::MARKDOWN_ENTRY_KEY.to_string(), content_hash_hex(body));
+		store
+			.save(
+				&target_identifier(&target),
+				&I18nHashing {
+					json_key_to_hash_map: hashes,
+				},
+			)
+			.await
+			.unwrap();
+
+		let translator = MockTranslator::default();
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Sync,
+			&markdown_options(&dir),
+		)
+		.await
+		.unwrap();
+
+		assert!(
+			translator.captured_inputs().is_empty(),
+			"unchanged document must not be re-translated"
+		);
+		// Existing translation must be left untouched.
+		assert_eq!(
+			fs::read_to_string(&target.file).await.unwrap(),
+			"# Bem-vindo (existing)\n"
+		);
+	}
+
+	#[tokio::test]
+	async fn markdown_sync_translates_when_target_missing() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let target = markdown_definition_in(&dir, "pt");
+		let body = "Hello world\n";
+
+		fs::write(&reference.file, body).await.unwrap();
+
+		let translator = MockTranslator::default();
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Sync,
+			&markdown_options(&dir),
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(translator.captured_inputs(), vec![body.to_string()]);
+		assert_eq!(fs::read_to_string(&target.file).await.unwrap(), format!("[pt]{body}"));
+	}
+
+	#[tokio::test]
+	async fn markdown_check_reports_missing_target_as_out_of_sync() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let target = markdown_definition_in(&dir, "pt");
+
+		fs::write(&reference.file, "# Title\n").await.unwrap();
+
+		let report = I18nGenerator::check(&reference, std::slice::from_ref(&target), &markdown_options(&dir))
+			.await
+			.unwrap();
+
+		assert_eq!(report.reference_entries, 1);
+		assert!(report.targets[0].needs_sync());
+		assert_eq!(
+			report.targets[0].missing_or_changed_keys,
+			vec![j18n_core::MARKDOWN_ENTRY_KEY.to_string()]
+		);
+	}
+
+	#[tokio::test]
+	async fn markdown_baseline_then_check_passes_for_existing_translation() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let target = markdown_definition_in(&dir, "pt");
+
+		fs::write(&reference.file, "# Title\n").await.unwrap();
+		fs::write(&target.file, "# Título\n").await.unwrap();
+
+		I18nGenerator::baseline(&reference, std::slice::from_ref(&target), &markdown_options(&dir))
+			.await
+			.unwrap();
+
+		let report = I18nGenerator::check(&reference, std::slice::from_ref(&target), &markdown_options(&dir))
+			.await
+			.unwrap();
+
+		assert!(!report.targets[0].needs_sync());
+	}
+
+	#[tokio::test]
+	async fn markdown_extrapolates_configured_placeholders_in_documents() {
+		let dir = TempDir::new().unwrap();
+		let reference = markdown_definition_in(&dir, "en");
+		let target = markdown_definition_in(&dir, "pt");
+		let body = "Welcome {{name}} to the docs\n";
+
+		fs::write(&reference.file, body).await.unwrap();
+
+		// The translator echoes its input; extrapolation must hand it a neutral
+		// placeholder and restore the original token afterwards.
+		let translator =
+			MockTranslator::default().with_response("Welcome [0] to the docs\n", "Bem-vindo [0] aos docs\n");
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Regenerate,
+			&markdown_options(&dir),
+		)
+		.await
+		.unwrap();
+
+		// The model saw the extrapolated form, not the raw token.
+		assert_eq!(
+			translator.captured_inputs(),
+			vec!["Welcome [0] to the docs\n".to_string()]
+		);
+		// The written document has the interpolation restored.
+		assert_eq!(
+			fs::read_to_string(&target.file).await.unwrap(),
+			"Bem-vindo {{name}} aos docs\n"
 		);
 	}
 }
