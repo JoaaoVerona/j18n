@@ -80,6 +80,38 @@ pub async fn write_markdown_file(definition: &I18nDefinition, body: &str) -> J18
 }
 
 fn change_i18n_property(mut json: Map<String, Value>, key_dot_separated: &str, value: &str) -> Map<String, Value> {
+	// 1. Leaf: an existing key whose value is not an object is overwritten
+	//    directly. Reached both for genuinely flat string entries and for the
+	//    final segment of a descent (e.g. "message" inside a Docusaurus entry).
+	if json
+		.get(key_dot_separated)
+		.is_some_and(|existing| !existing.is_object())
+	{
+		json.insert(key_dot_separated.to_string(), Value::String(value.to_string()));
+
+		return json;
+	}
+
+	// 2. Route into the LONGEST existing object-valued key that is a dot-boundary
+	//    prefix of the path. This preserves keys that contain literal dots — e.g.
+	//    Docusaurus / i18next "flat" keys like "theme.docs.paginator.next" or
+	//    "link.title.More" — instead of re-nesting them into separate objects.
+	if let Some(prefix) = longest_object_prefix(&json, key_dot_separated) {
+		let remainder = key_dot_separated[prefix.len()..].trim_start_matches('.');
+		let sub_json = match json.remove(&prefix) {
+			Some(Value::Object(existing)) => existing,
+			_ => Map::new(),
+		};
+		let changed_sub_json = change_i18n_property(sub_json, remainder, value);
+
+		json.insert(prefix, Value::Object(changed_sub_json));
+
+		return json;
+	}
+
+	// 3. No existing structure matched: split on the first dot and create nested
+	//    objects. Used when a key is absent from the target (fresh translation of
+	//    a nested-style dictionary).
 	if let Some((this_part, rest_parts)) = key_dot_separated.split_once('.') {
 		let sub_json = match json.remove(this_part) {
 			Some(Value::Object(existing)) => existing,
@@ -95,6 +127,35 @@ fn change_i18n_property(mut json: Map<String, Value>, key_dot_separated: &str, v
 	json.insert(key_dot_separated.to_string(), Value::String(value.to_string()));
 
 	json
+}
+
+/// Returns the longest key in `json` whose value is an object and that is a
+/// strict dot-boundary prefix of `path` (so `path == "<key>.<rest>"`). Used to
+/// descend into existing keys that themselves contain dots before falling back
+/// to creating new nesting.
+fn longest_object_prefix(json: &Map<String, Value>, path: &str) -> Option<String> {
+	let mut best: Option<&String> = None;
+
+	for key in json.keys() {
+		if path.len() <= key.len() || !path.starts_with(key.as_str()) || path.as_bytes()[key.len()] != b'.' {
+			continue;
+		}
+
+		if !matches!(json.get(key), Some(Value::Object(_))) {
+			continue;
+		}
+
+		let better = match best {
+			Some(current) => key.len() > current.len(),
+			None => true,
+		};
+
+		if better {
+			best = Some(key);
+		}
+	}
+
+	best.cloned()
 }
 
 fn remove_keys_absent_from_reference_dict(
@@ -436,5 +497,100 @@ mod tests {
 		write_markdown_file(&definition, "new content\n").await.unwrap();
 
 		assert_eq!(fs::read_to_string(&definition.file).await.unwrap(), "new content\n");
+	}
+
+	// Docusaurus / i18next "flat" translation files use single keys that contain
+	// literal dots, mapping to a `{ "message": ... }` object. The translated
+	// value must land inside that flat key, not re-nested into a new object tree.
+	#[tokio::test]
+	async fn translates_flat_dotted_key_in_place_without_renesting() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"theme.docs.paginator.next": {"message": "Next"}}"#);
+		let initial = reference.clone();
+		let translations = vec![vec![(
+			"theme.docs.paginator.next.message".to_string(),
+			"Próximo".to_string(),
+		)]];
+
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+			.await
+			.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+		let parsed: Map<String, Value> = serde_json::from_str(&written).unwrap();
+
+		// The flat key is preserved verbatim and its message is translated...
+		assert_eq!(parsed["theme.docs.paginator.next"]["message"], "Próximo");
+		// ...and no stray nested "theme" object tree was created.
+		assert!(!parsed.contains_key("theme"));
+		assert_eq!(parsed.len(), 1);
+	}
+
+	#[tokio::test]
+	async fn translates_flat_dotted_key_with_spaces_and_many_dots() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"link.item.label.Go to Skiley": {"message": "Go to Skiley"}}"#);
+		let initial = reference.clone();
+		let translations = vec![vec![(
+			"link.item.label.Go to Skiley.message".to_string(),
+			"Ir para o Skiley".to_string(),
+		)]];
+
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+			.await
+			.unwrap();
+
+		let parsed: Map<String, Value> =
+			serde_json::from_str(&fs::read_to_string(&definition.file).await.unwrap()).unwrap();
+
+		assert_eq!(parsed["link.item.label.Go to Skiley"]["message"], "Ir para o Skiley");
+		assert!(!parsed.contains_key("link"));
+	}
+
+	#[tokio::test]
+	async fn flat_and_dotless_keys_translate_side_by_side() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"copyright": {"message": "Copyright"}, "link.title.More": {"message": "More"}}"#);
+		let initial = reference.clone();
+		let translations = vec![vec![
+			("copyright.message".to_string(), "Direitos autorais".to_string()),
+			("link.title.More.message".to_string(), "Mais".to_string()),
+		]];
+
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+			.await
+			.unwrap();
+
+		let parsed: Map<String, Value> =
+			serde_json::from_str(&fs::read_to_string(&definition.file).await.unwrap()).unwrap();
+
+		assert_eq!(parsed["copyright"]["message"], "Direitos autorais");
+		assert_eq!(parsed["link.title.More"]["message"], "Mais");
+		assert!(!parsed.contains_key("link"));
+	}
+
+	#[tokio::test]
+	async fn nested_dictionaries_still_route_through_object_levels() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"section": {"a": "A", "nested": {"b": "B"}}}"#);
+		let initial = reference.clone();
+		let translations = vec![vec![
+			("section.a".to_string(), "AA".to_string()),
+			("section.nested.b".to_string(), "BB".to_string()),
+		]];
+
+		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+			.await
+			.unwrap();
+
+		let parsed: Map<String, Value> =
+			serde_json::from_str(&fs::read_to_string(&definition.file).await.unwrap()).unwrap();
+
+		assert_eq!(parsed["section"]["a"], "AA");
+		assert_eq!(parsed["section"]["nested"]["b"], "BB");
 	}
 }

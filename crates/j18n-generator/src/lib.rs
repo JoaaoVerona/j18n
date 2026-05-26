@@ -1539,4 +1539,57 @@ mod tests {
 			"Bem-vindo {{name}} aos docs\n"
 		);
 	}
+
+	#[tokio::test]
+	async fn json_flat_dotted_keys_translate_in_place_excluding_description() {
+		// End-to-end on a Docusaurus-style translation file: flat keys containing
+		// dots, each mapping to {message, description}. Only `message` should be
+		// translated and the flat key must survive without re-nesting.
+		let dir = TempDir::new().unwrap();
+		let reference = definition_in(&dir, "en");
+		let target = definition_in(&dir, "pt");
+
+		fs::write(
+			&reference.file,
+			r#"{
+				"theme.docs.paginator.next": { "message": "Next", "description": "The next button label" },
+				"link.title.More": { "message": "More", "description": "Footer column title" }
+			}"#,
+		)
+		.await
+		.unwrap();
+
+		let translator = MockTranslator::default();
+		let mut options = default_options(&dir);
+
+		options.exclude_patterns = vec![PathPattern::parse("**.description").unwrap()];
+
+		I18nGenerator::execute(
+			&translator,
+			&reference,
+			std::slice::from_ref(&target),
+			GenerationMode::Regenerate,
+			&options,
+		)
+		.await
+		.unwrap();
+
+		// Only the two `message` values were sent to the translator (descriptions excluded).
+		let mut inputs = translator.captured_inputs();
+		inputs.sort();
+		assert_eq!(inputs, vec!["More".to_string(), "Next".to_string()]);
+
+		let written = read_json(&target.file).await;
+
+		// Flat keys preserved, messages translated, no nested "theme"/"link" trees, descriptions dropped.
+		assert_eq!(written["theme.docs.paginator.next"]["message"], "[pt]Next");
+		assert_eq!(written["link.title.More"]["message"], "[pt]More");
+		assert!(!written.contains_key("theme"));
+		assert!(!written.contains_key("link"));
+		assert!(written["theme.docs.paginator.next"]
+			.as_object()
+			.unwrap()
+			.get("description")
+			.is_none());
+	}
 }
