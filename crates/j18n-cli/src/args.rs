@@ -39,9 +39,69 @@ pub enum Command {
 
 	#[command(
 		name = "install-git-hook",
-		about = "Install a `pre-commit` hook in the current repo that runs `j18n check` against the configured files."
+		about = "Install the given git hook (e.g. `pre-commit`, `pre-push`) in the current repo that runs `j18n check` against the configured files."
 	)]
-	InstallGitHook(CommandArgs),
+	InstallGitHook(InstallGitHookArgs),
+}
+
+/// Client-side git hooks that may be installed. Server-side hooks
+/// (`pre-receive`, `update`, `post-receive`, ...) are intentionally omitted
+/// since they make no sense for a local `j18n check`.
+pub const VALID_GIT_HOOKS: &[&str] = &[
+	"applypatch-msg",
+	"pre-applypatch",
+	"post-applypatch",
+	"pre-commit",
+	"pre-merge-commit",
+	"prepare-commit-msg",
+	"commit-msg",
+	"post-commit",
+	"pre-rebase",
+	"post-checkout",
+	"post-merge",
+	"pre-push",
+	"post-rewrite",
+	"pre-auto-gc",
+	"sendemail-validate",
+];
+
+fn parse_git_hook(value: &str) -> Result<String, String> {
+	if VALID_GIT_HOOKS.contains(&value) {
+		Ok(value.to_string())
+	} else {
+		Err(format!(
+			"unknown git hook \"{value}\"; expected one of: {}",
+			VALID_GIT_HOOKS.join(", ")
+		))
+	}
+}
+
+#[derive(Args, Debug, Default)]
+pub struct InstallGitHookArgs {
+	#[arg(
+		value_name = "HOOK",
+		value_parser = parse_git_hook,
+		help = "Which git hook to install (e.g. \"pre-commit\", \"pre-push\"). The hook runs `j18n check` against the configured files."
+	)]
+	pub hook: String,
+
+	#[arg(
+		short = 'f',
+		long = "file",
+		value_name = "PATH",
+		help = "Path to a JSON configuration file. May be repeated to act on multiple configs. Defaults to \"j18n.json\" in the current directory when omitted."
+	)]
+	pub configs: Vec<PathBuf>,
+}
+
+impl InstallGitHookArgs {
+	pub fn resolved_configs(&self) -> Vec<PathBuf> {
+		if self.configs.is_empty() {
+			vec![PathBuf::from(DEFAULT_CONFIG_FILE)]
+		} else {
+			self.configs.clone()
+		}
+	}
 }
 
 #[derive(Args, Debug, Default)]

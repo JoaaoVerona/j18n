@@ -3,7 +3,7 @@ mod config;
 mod expand;
 
 use anyhow::{Context, Result};
-use args::{Cli, Command, CommandArgs, InitArgs};
+use args::{Cli, Command, CommandArgs, InitArgs, InstallGitHookArgs};
 use clap::Parser;
 use config::{I18nToolConfig, NamespacesConfig, TranslatorSelection};
 use j18n_claude_code::ClaudeCodeBasedI18nTranslator;
@@ -349,20 +349,20 @@ async fn baseline(args: CommandArgs) -> Result<()> {
 	Ok(())
 }
 
-async fn install_git_hook(args: CommandArgs) -> Result<()> {
+async fn install_git_hook(args: InstallGitHookArgs) -> Result<()> {
 	let cwd = std::env::current_dir().context("failed to read current directory")?;
 
-	install_git_hook_at(&cwd, &args.resolved_configs()).await
+	install_git_hook_at(&cwd, &args.hook, &args.resolved_configs()).await
 }
 
-async fn install_git_hook_at(repo_root: &Path, configs: &[PathBuf]) -> Result<()> {
+async fn install_git_hook_at(repo_root: &Path, hook: &str, configs: &[PathBuf]) -> Result<()> {
 	let hooks_dir = resolve_git_hooks_dir(repo_root)?;
 
 	tokio::fs::create_dir_all(&hooks_dir)
 		.await
 		.with_context(|| format!("failed to create hooks dir \"{}\"", hooks_dir.display()))?;
 
-	let hook_path = hooks_dir.join("pre-commit");
+	let hook_path = hooks_dir.join(hook);
 	let check_line = build_check_line(configs);
 	let already_exists = tokio::fs::try_exists(&hook_path)
 		.await
@@ -375,7 +375,7 @@ async fn install_git_hook_at(repo_root: &Path, configs: &[PathBuf]) -> Result<()
 
 		if existing.lines().any(|line| line.trim() == check_line) {
 			info!(
-				"Pre-commit hook at \"{}\" already runs `{}`; nothing to do",
+				"{hook} hook at \"{}\" already runs `{}`; nothing to do",
 				hook_path.display(),
 				check_line
 			);
@@ -397,7 +397,7 @@ async fn install_git_hook_at(repo_root: &Path, configs: &[PathBuf]) -> Result<()
 			.with_context(|| format!("failed to write \"{}\"", hook_path.display()))?;
 
 		info!(
-			"Appended `{}` to existing pre-commit hook at \"{}\"",
+			"Appended `{}` to existing {hook} hook at \"{}\"",
 			check_line,
 			hook_path.display()
 		);
@@ -408,7 +408,7 @@ async fn install_git_hook_at(repo_root: &Path, configs: &[PathBuf]) -> Result<()
 			.await
 			.with_context(|| format!("failed to write \"{}\"", hook_path.display()))?;
 
-		info!("Installed pre-commit hook at \"{}\"", hook_path.display());
+		info!("Installed {hook} hook at \"{}\"", hook_path.display());
 	}
 
 	#[cfg(unix)]
@@ -1006,7 +1006,7 @@ mod tests {
 
 		std::fs::create_dir_all(dir.path().join(".git").join("hooks")).unwrap();
 
-		install_git_hook_at(dir.path(), &[PathBuf::from("locales/app.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("locales/app.json")])
 			.await
 			.unwrap();
 
@@ -1031,7 +1031,7 @@ mod tests {
 
 		std::fs::create_dir(dir.path().join(".git")).unwrap();
 
-		install_git_hook_at(dir.path(), &[PathBuf::from("a.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("a.json")])
 			.await
 			.unwrap();
 
@@ -1046,7 +1046,7 @@ mod tests {
 		std::fs::create_dir_all(&hooks_dir).unwrap();
 		std::fs::write(hooks_dir.join("pre-commit"), "#!/bin/sh\nnpm test\n").unwrap();
 
-		install_git_hook_at(dir.path(), &[PathBuf::from("a.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("a.json")])
 			.await
 			.unwrap();
 
@@ -1061,10 +1061,10 @@ mod tests {
 
 		std::fs::create_dir_all(dir.path().join(".git").join("hooks")).unwrap();
 
-		install_git_hook_at(dir.path(), &[PathBuf::from("a.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("a.json")])
 			.await
 			.unwrap();
-		install_git_hook_at(dir.path(), &[PathBuf::from("b.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("b.json")])
 			.await
 			.unwrap();
 
@@ -1084,10 +1084,10 @@ mod tests {
 
 		std::fs::create_dir_all(dir.path().join(".git").join("hooks")).unwrap();
 
-		install_git_hook_at(dir.path(), &[PathBuf::from("a.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("a.json")])
 			.await
 			.unwrap();
-		install_git_hook_at(dir.path(), &[PathBuf::from("a.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("a.json")])
 			.await
 			.unwrap();
 
@@ -1106,7 +1106,7 @@ mod tests {
 		std::fs::create_dir_all(&hooks_dir).unwrap();
 		std::fs::write(hooks_dir.join("pre-commit"), "#!/bin/sh\nnpm test").unwrap();
 
-		install_git_hook_at(dir.path(), &[PathBuf::from("a.json")])
+		install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("a.json")])
 			.await
 			.unwrap();
 
@@ -1118,11 +1118,30 @@ mod tests {
 	#[tokio::test]
 	async fn install_git_hook_at_errors_when_not_in_git_repo() {
 		let dir = TempDir::new().unwrap();
-		let err = install_git_hook_at(dir.path(), &[PathBuf::from("a.json")])
+		let err = install_git_hook_at(dir.path(), "pre-commit", &[PathBuf::from("a.json")])
 			.await
 			.unwrap_err();
 
 		assert!(format!("{err:#}").contains(".git"));
+	}
+
+	#[tokio::test]
+	async fn install_git_hook_at_writes_named_hook() {
+		let dir = TempDir::new().unwrap();
+
+		std::fs::create_dir_all(dir.path().join(".git").join("hooks")).unwrap();
+
+		install_git_hook_at(dir.path(), "pre-push", &[PathBuf::from("a.json")])
+			.await
+			.unwrap();
+
+		let hook_path = dir.path().join(".git").join("hooks").join("pre-push");
+
+		assert!(hook_path.exists());
+
+		let content = tokio::fs::read_to_string(&hook_path).await.unwrap();
+
+		assert_eq!(content, "#!/bin/sh\nset -e\nj18n check -f 'a.json'\n");
 	}
 
 	fn write_namespaced_config(

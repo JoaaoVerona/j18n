@@ -128,7 +128,7 @@ j18n sync              [-f <PATH>...]  # translate missing or changed entries
 j18n regenerate        [-f <PATH>...]  # re-translate every entry, replacing existing values
 j18n check             [-f <PATH>...]  # dry-run sync; exits non-zero if anything would change
 j18n baseline          [-f <PATH>...]  # record current reference hashes without translating; use when adopting j18n on a project that already has translations
-j18n install-git-hook  [-f <PATH>...]  # install a pre-commit hook in the current repo that runs `j18n check`
+j18n install-git-hook <HOOK> [-f <PATH>...]  # install the given git hook (e.g. pre-commit, pre-push) that runs `j18n check`
 ```
 
 Every command takes its config path via `-f`/`--file` and defaults to
@@ -137,8 +137,10 @@ config (everything except `init`), pass `-f` multiple times to act on
 several configs in one run (e.g. `j18n check -f web.json -f mobile.json`).
 `check` is meant for CI pipelines; it exits with a non-zero status if any
 target locale is out of sync (missing keys, stale keys, or changed reference
-values). `install-git-hook` writes `.git/hooks/pre-commit` so commits fail
-until you run `j18n sync`.
+values). `install-git-hook` takes a required hook name and writes
+`.git/hooks/<HOOK>` so the chosen action fails until you run `j18n sync` (e.g.
+`j18n install-git-hook pre-commit` blocks commits, `j18n install-git-hook
+pre-push` blocks pushes).
 
 `baseline` writes (or merges into) the hash cache file from the **current**
 reference and target file contents, marking each existing target translation
