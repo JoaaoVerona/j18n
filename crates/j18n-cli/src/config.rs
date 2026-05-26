@@ -15,7 +15,13 @@ pub struct DefinitionEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NamespacesConfig {
 	List(Vec<String>),
+	/// `"*"` — discover namespaces in the single directory that contains the
+	/// `{namespace}` token component (non-recursive).
 	Wildcard,
+	/// `"**"` — discover namespaces recursively under that directory; the
+	/// `{namespace}` token then represents a nested relative path (e.g.
+	/// `getting-started/faq`). Requires the token to sit in the file name.
+	RecursiveWildcard,
 }
 
 impl<'de> Deserialize<'de> for NamespacesConfig {
@@ -29,19 +35,19 @@ impl<'de> Deserialize<'de> for NamespacesConfig {
 			type Value = NamespacesConfig;
 
 			fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-				formatter.write_str("the string \"*\" or an array of namespace names")
+				formatter.write_str("the string \"*\" or \"**\", or an array of namespace names")
 			}
 
 			fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
 			where
 				E: de::Error,
 			{
-				if value == "*" {
-					Ok(NamespacesConfig::Wildcard)
-				} else {
-					Err(E::custom(format!(
-						"expected \"*\" for wildcard namespace discovery, got \"{value}\""
-					)))
+				match value {
+					"*" => Ok(NamespacesConfig::Wildcard),
+					"**" => Ok(NamespacesConfig::RecursiveWildcard),
+					other => Err(E::custom(format!(
+						"expected \"*\" (single-directory) or \"**\" (recursive) for wildcard namespace discovery, got \"{other}\""
+					))),
 				}
 			}
 

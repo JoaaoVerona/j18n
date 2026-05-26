@@ -147,7 +147,7 @@ async fn build_runs(
 				.map(|entry| build_definition(config_path, &entry.file, &entry.language))
 				.collect(),
 		}]),
-		Some(NamespacesConfig::List(names)) => build_namespaced_runs(config_path, config, names),
+		Some(NamespacesConfig::List(names)) => build_namespaced_runs(config_path, config, names, false),
 		Some(NamespacesConfig::Wildcard) => {
 			let names = expand::discover_namespaces_from_reference(resolved_reference_template)
 				.await
@@ -159,7 +159,20 @@ async fn build_runs(
 				config_path.display(),
 				names.join(", ")
 			);
-			build_namespaced_runs(config_path, config, &names)
+			build_namespaced_runs(config_path, config, &names, false)
+		}
+		Some(NamespacesConfig::RecursiveWildcard) => {
+			let names = expand::discover_namespaces_recursive(resolved_reference_template)
+				.await
+				.with_context(|| format!("recursive namespace discovery failed for \"{}\"", config_path.display()))?;
+
+			info!(
+				"Discovered {} namespace(s) recursively for \"{}\": {}",
+				names.len(),
+				config_path.display(),
+				names.join(", ")
+			);
+			build_namespaced_runs(config_path, config, &names, true)
 		}
 	}
 }
@@ -168,14 +181,20 @@ fn build_namespaced_runs(
 	config_path: &Path,
 	config: &I18nToolConfig,
 	namespace_names: &[String],
+	allow_nested: bool,
 ) -> Result<Vec<ResolvedRun>> {
 	let target_files: Vec<String> = config
 		.generate_i18n_for
 		.iter()
 		.map(|entry| entry.file.clone())
 		.collect();
-	let expanded = expand::expand_with_list(&config.reference_i18n.file, &target_files, namespace_names)
-		.with_context(|| format!("invalid config \"{}\"", config_path.display()))?;
+	let expanded = expand::expand_with_list(
+		&config.reference_i18n.file,
+		&target_files,
+		namespace_names,
+		allow_nested,
+	)
+	.with_context(|| format!("invalid config \"{}\"", config_path.display()))?;
 	let mut runs: Vec<ResolvedRun> = Vec::with_capacity(expanded.len());
 
 	for run in expanded {
@@ -1195,6 +1214,43 @@ mod tests {
 
 		namespaces.sort();
 		assert_eq!(namespaces, vec!["auth", "common"]);
+	}
+
+	#[tokio::test]
+	async fn resolve_config_with_recursive_wildcard_discovers_nested_namespaces() {
+		let dir = TempDir::new().unwrap();
+		let docs = dir.path().join("docs");
+
+		std::fs::create_dir_all(docs.join("getting-started")).unwrap();
+		std::fs::write(docs.join("welcome.mdx"), "# Welcome").unwrap();
+		std::fs::write(docs.join("getting-started").join("faq.mdx"), "# FAQ").unwrap();
+
+		let config = write_namespaced_config(
+			&dir,
+			"docs/{namespace}.mdx",
+			&[("i18n/pt/current/{namespace}.mdx", "Portuguese")],
+			r#""**""#,
+		);
+
+		let resolved = resolve_config(&config).await.unwrap();
+
+		let mut namespaces: Vec<&str> = resolved
+			.runs
+			.iter()
+			.filter_map(|run| run.namespace.as_deref())
+			.collect();
+
+		namespaces.sort();
+		assert_eq!(namespaces, vec!["getting-started/faq", "welcome"]);
+
+		let faq_run = resolved
+			.runs
+			.iter()
+			.find(|run| run.namespace.as_deref() == Some("getting-started/faq"))
+			.unwrap();
+
+		assert_eq!(faq_run.reference_i18n.id, "docs/getting-started/faq.mdx");
+		assert_eq!(faq_run.generated_i18ns[0].id, "i18n/pt/current/getting-started/faq.mdx");
 	}
 
 	#[tokio::test]

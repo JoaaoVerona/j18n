@@ -194,7 +194,7 @@ specific release if you don't want `latest`:
 | `generateI18nFor`        | object[]            | Target locales: `{ "file": "...", "language": "..." }`. |
 | `hashCacheLocation`      | string *(optional)* | Override where the cache file lives. Defaults to `.j18n-cache.ini` in the reference file's directory (or the deepest fixed-prefix directory when using namespaces). |
 | `interpolationPatterns`  | string[]            | Regexes matching substrings to preserve verbatim through translation. See **Patterns**. |
-| `namespaces`             | string \| string[] *(optional)* | `"*"` to auto-discover namespaces from the reference's parent directory, or an explicit list. Required when any `file` contains `{namespace}`; forbidden otherwise. See **Namespaces**. |
+| `namespaces`             | string \| string[] *(optional)* | `"*"` to auto-discover namespaces in the reference's directory, `"**"` to discover recursively (nested `{namespace}` paths), or an explicit list. Required when any `file` contains `{namespace}`; forbidden otherwise. See **Namespaces**. |
 | `parallelBatches`        | integer (≥ 1)       | Max LLM batches in flight. `init` default: 3. |
 | `referenceI18n`          | object              | Source locale, same shape as a target. |
 | `retriesPerError`        | integer (≥ 0)       | How many times to retry a batch when translation fails (LLM HTTP error, mismatched interpolation count, validation failure, etc.). A value of `0` disables retries — the batch fails on the first error. `init` default: 3. |
@@ -242,6 +242,36 @@ Wildcard mode — auto-discover every namespace in the reference's directory:
 Drop a new file into `locales/en/` and the next `j18n sync` picks it up
 automatically — no config edit.
 
+Recursive wildcard mode — `"**"` walks the reference directory **and every
+subdirectory**, so the `{namespace}` token represents a nested relative path.
+This collapses a whole tree of source files into one config — handy for
+documentation sites (e.g. a Docusaurus `docs/` tree translated with
+`"format": "markdown"`):
+
+```json
+{
+    "additionalPrompts": [],
+    "batchSize": 1,
+    "excludePatterns": [],
+    "format": "markdown",
+    "generateI18nFor": [
+        { "file": "i18n/pt/docusaurus-plugin-content-docs/current/{namespace}.mdx", "language": "Brazilian Portuguese" }
+    ],
+    "interpolationPatterns": [],
+    "namespaces": "**",
+    "parallelBatches": 3,
+    "referenceI18n": { "file": "docs/{namespace}.mdx", "language": "English" },
+    "retriesPerError": 3,
+    "translator": "claude-code"
+}
+```
+
+Against `docs/welcome.mdx`, `docs/getting-started/faq.mdx`,
+`docs/legal/terms-of-use.mdx`, … this discovers `welcome`,
+`getting-started/faq`, `legal/terms-of-use`, … — each substituted back into
+both the reference and target paths. `"**"` requires the `{namespace}` token to
+be in the **file name** (not a directory component).
+
 Explicit list — list namespaces by hand when you want full control over what
 gets processed:
 
@@ -265,6 +295,10 @@ gets processed:
   mistaken for a namespace.
 - Files or directories whose names don't match the pattern (e.g. a stray
   `README.md`) are ignored.
+- `"**"` (recursive) requires `{namespace}` to be in the **file name** (not a
+  directory component), so a nested namespace substitutes back into a valid
+  path. Discovered names use `/` separators; hidden directories (starting with
+  `.`) are skipped.
 
 ### Hash cache location with namespaces
 

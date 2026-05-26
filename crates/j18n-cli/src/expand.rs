@@ -50,19 +50,41 @@ pub fn substitute_namespace(template: &str, namespace: &str) -> String {
 	template.replace(NAMESPACE_TOKEN, namespace)
 }
 
-/// Validates an explicit namespace name. Forbids empty names, names containing
-/// path separators, or names containing the namespace token.
-pub fn validate_namespace_name(name: &str) -> Result<()> {
+/// Validates a namespace name. Always forbids empty names, backslashes, and the
+/// namespace token. When `allow_nested` is false (explicit lists and `"*"`
+/// discovery) a `/` is also rejected, so a namespace stays a single path
+/// component. When true (recursive `"**"` discovery) `/` is permitted as a
+/// nested-path separator, but leading/trailing slashes and empty / `.` / `..`
+/// segments are rejected.
+pub fn validate_namespace_name(name: &str, allow_nested: bool) -> Result<()> {
 	if name.is_empty() {
 		anyhow::bail!("namespace name must not be empty");
 	}
 
-	if name.contains('/') || name.contains('\\') {
-		anyhow::bail!("namespace name \"{name}\" must not contain path separators");
+	if name.contains('\\') {
+		anyhow::bail!("namespace name \"{name}\" must not contain a backslash; use \"/\" as the path separator");
 	}
 
 	if name.contains(NAMESPACE_TOKEN) {
 		anyhow::bail!("namespace name \"{name}\" must not contain \"{NAMESPACE_TOKEN}\"");
+	}
+
+	if !allow_nested {
+		if name.contains('/') {
+			anyhow::bail!("namespace name \"{name}\" must not contain path separators");
+		}
+
+		return Ok(());
+	}
+
+	if name.starts_with('/') || name.ends_with('/') {
+		anyhow::bail!("nested namespace name \"{name}\" must not start or end with \"/\"");
+	}
+
+	for segment in name.split('/') {
+		if segment.is_empty() || segment == "." || segment == ".." {
+			anyhow::bail!("nested namespace name \"{name}\" must not contain empty, \".\", or \"..\" segments");
+		}
 	}
 
 	Ok(())
@@ -74,13 +96,14 @@ pub fn expand_with_list(
 	reference_file: &str,
 	target_files: &[String],
 	namespaces: &[String],
+	allow_nested: bool,
 ) -> Result<Vec<ExpandedRun>> {
 	if namespaces.is_empty() {
 		anyhow::bail!("`namespaces` list is empty; provide at least one name or use \"*\" for wildcard discovery");
 	}
 
 	for name in namespaces {
-		validate_namespace_name(name).with_context(|| format!("invalid namespace name \"{name}\""))?;
+		validate_namespace_name(name, allow_nested).with_context(|| format!("invalid namespace name \"{name}\""))?;
 	}
 
 	let mut runs: Vec<ExpandedRun> = Vec::with_capacity(namespaces.len());
@@ -239,6 +262,132 @@ pub async fn discover_namespaces_from_reference(resolved_reference_template: &Pa
 	Ok(namespaces)
 }
 
+/// Recursively discovers namespaces under the directory containing the
+/// `{namespace}` token, walking every subdirectory. Each matching file's
+/// namespace is its path relative to the discovery directory (with `/`
+/// separators) after stripping the component prefix/suffix — so
+/// `docs/{namespace}.mdx` discovers `welcome`, `getting-started/faq`,
+/// `legal/terms-of-use`, … from a nested tree.
+///
+/// Requires the token to live in the file name (not a directory component),
+/// since only then can a nested namespace be substituted back into a
+/// well-formed path. Hidden entries (name starting with `.`) are skipped.
+pub async fn discover_namespaces_recursive(resolved_reference_template: &Path) -> Result<Vec<String>> {
+	let position = parse_namespace_token_position(resolved_reference_template)?;
+
+	if !position.token_in_basename {
+		anyhow::bail!(
+			"recursive namespace discovery (\"**\") requires the \"{NAMESPACE_TOKEN}\" token to be in the file name, not a directory component"
+		);
+	}
+
+	if !tokio::fs::try_exists(&position.discovery_directory)
+		.await
+		.with_context(|| format!("failed to stat \"{}\"", position.discovery_directory.display()))?
+	{
+		anyhow::bail!(
+			"cannot discover namespaces: directory \"{}\" does not exist",
+			position.discovery_directory.display()
+		);
+	}
+
+	let template_string = resolved_reference_template.to_string_lossy().to_string();
+	let mut namespaces: Vec<String> = Vec::new();
+	let mut pending: Vec<PathBuf> = vec![position.discovery_directory.clone()];
+
+	while let Some(directory) = pending.pop() {
+		let mut entries = tokio::fs::read_dir(&directory)
+			.await
+			.with_context(|| format!("failed to list \"{}\" for namespace discovery", directory.display()))?;
+
+		while let Some(entry) = entries
+			.next_entry()
+			.await
+			.with_context(|| format!("failed to read entry in \"{}\"", directory.display()))?
+		{
+			let file_name = entry.file_name();
+			let Some(file_name) = file_name.to_str() else {
+				continue;
+			};
+
+			if file_name.starts_with('.') {
+				continue;
+			}
+
+			let file_type = entry
+				.file_type()
+				.await
+				.with_context(|| format!("failed to stat \"{}\"", entry.path().display()))?;
+
+			if file_type.is_dir() {
+				pending.push(entry.path());
+
+				continue;
+			}
+
+			if !file_type.is_file() {
+				continue;
+			}
+
+			let Some(relative) = relative_slash_path(&position.discovery_directory, &entry.path()) else {
+				continue;
+			};
+			let Some(namespace) = relative
+				.strip_prefix(&position.component_prefix)
+				.and_then(|stripped| stripped.strip_suffix(&position.component_suffix))
+			else {
+				continue;
+			};
+
+			if namespace.is_empty() {
+				continue;
+			}
+
+			let candidate_path = PathBuf::from(substitute_namespace(&template_string, namespace));
+
+			if !tokio::fs::try_exists(&candidate_path).await.unwrap_or(false) {
+				continue;
+			}
+
+			namespaces.push(namespace.to_string());
+		}
+	}
+
+	if namespaces.is_empty() {
+		anyhow::bail!(
+			"no namespaces discovered under \"{}\" matching pattern \"{}{NAMESPACE_TOKEN}{}\"",
+			position.discovery_directory.display(),
+			position.component_prefix,
+			position.component_suffix
+		);
+	}
+
+	namespaces.sort();
+	namespaces.dedup();
+
+	Ok(namespaces)
+}
+
+/// Renders `path` relative to `root` as a `/`-separated string. Returns `None`
+/// when `path` is not under `root` or contains non-normal components.
+fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
+	let relative = path.strip_prefix(root).ok()?;
+	let mut parts: Vec<String> = Vec::new();
+
+	for component in relative.components() {
+		match component {
+			Component::Normal(segment) => parts.push(segment.to_str()?.to_string()),
+			_ => return None,
+		}
+	}
+
+	if parts.is_empty() {
+		return None;
+	}
+
+	Some(parts.join("/"))
+}
+
 /// Resolves the default hash-cache directory for a namespaced reference
 /// template: the deepest path prefix that does not depend on `{namespace}`.
 ///
@@ -364,17 +513,34 @@ mod tests {
 
 	#[test]
 	fn validate_namespace_name_accepts_simple_names() {
-		assert!(validate_namespace_name("common").is_ok());
-		assert!(validate_namespace_name("auth-flow").is_ok());
-		assert!(validate_namespace_name("a.b").is_ok());
+		assert!(validate_namespace_name("common", false).is_ok());
+		assert!(validate_namespace_name("auth-flow", false).is_ok());
+		assert!(validate_namespace_name("a.b", false).is_ok());
 	}
 
 	#[test]
 	fn validate_namespace_name_rejects_empty_or_separator_or_token() {
-		assert!(validate_namespace_name("").is_err());
-		assert!(validate_namespace_name("a/b").is_err());
-		assert!(validate_namespace_name("a\\b").is_err());
-		assert!(validate_namespace_name("{namespace}").is_err());
+		assert!(validate_namespace_name("", false).is_err());
+		assert!(validate_namespace_name("a/b", false).is_err());
+		assert!(validate_namespace_name("a\\b", false).is_err());
+		assert!(validate_namespace_name("{namespace}", false).is_err());
+	}
+
+	#[test]
+	fn validate_namespace_name_allows_nested_paths_when_enabled() {
+		assert!(validate_namespace_name("getting-started/faq", true).is_ok());
+		assert!(validate_namespace_name("a/b/c", true).is_ok());
+		assert!(validate_namespace_name("welcome", true).is_ok());
+	}
+
+	#[test]
+	fn validate_namespace_name_rejects_bad_nested_paths_even_when_enabled() {
+		assert!(validate_namespace_name("/leading", true).is_err());
+		assert!(validate_namespace_name("trailing/", true).is_err());
+		assert!(validate_namespace_name("a//b", true).is_err());
+		assert!(validate_namespace_name("a/../b", true).is_err());
+		assert!(validate_namespace_name("a\\b", true).is_err());
+		assert!(validate_namespace_name("{namespace}/x", true).is_err());
 	}
 
 	#[test]
@@ -386,6 +552,7 @@ mod tests {
 				"locales/es/{namespace}.json".to_string(),
 			],
 			&["common".to_string(), "auth".to_string()],
+			false,
 		)
 		.unwrap();
 
@@ -406,6 +573,7 @@ mod tests {
 			"locales/en/{namespace}.json",
 			&["locales/pt/{namespace}.json".to_string()],
 			&[],
+			false,
 		);
 		let err = result.unwrap_err();
 
@@ -414,9 +582,25 @@ mod tests {
 
 	#[test]
 	fn expand_with_list_errors_on_invalid_namespace_name() {
-		let result = expand_with_list("locales/en/{namespace}.json", &[], &["bad/name".to_string()]);
+		let result = expand_with_list("locales/en/{namespace}.json", &[], &["bad/name".to_string()], false);
 
 		assert!(result.is_err());
+	}
+
+	#[test]
+	fn expand_with_list_substitutes_nested_namespace_into_each_path_when_allowed() {
+		let runs = expand_with_list(
+			"docs/{namespace}.mdx",
+			&["i18n/pt/current/{namespace}.mdx".to_string()],
+			&["welcome".to_string(), "getting-started/faq".to_string()],
+			true,
+		)
+		.unwrap();
+
+		assert_eq!(runs.len(), 2);
+		assert_eq!(runs[1].namespace.as_deref(), Some("getting-started/faq"));
+		assert_eq!(runs[1].reference_file, "docs/getting-started/faq.mdx");
+		assert_eq!(runs[1].target_files, vec!["i18n/pt/current/getting-started/faq.mdx"]);
 	}
 
 	#[test]
@@ -588,6 +772,64 @@ mod tests {
 		let result = discover_namespaces_from_reference(&template).await;
 
 		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn discover_namespaces_recursive_walks_nested_directories() {
+		let dir = TempDir::new().unwrap();
+		let docs = dir.path().join("docs");
+
+		tokio::fs::create_dir_all(docs.join("getting-started")).await.unwrap();
+		tokio::fs::create_dir_all(docs.join("legal")).await.unwrap();
+		tokio::fs::write(docs.join("welcome.mdx"), "# Welcome").await.unwrap();
+		tokio::fs::write(docs.join("getting-started").join("faq.mdx"), "# FAQ")
+			.await
+			.unwrap();
+		tokio::fs::write(docs.join("legal").join("terms-of-use.mdx"), "# Terms")
+			.await
+			.unwrap();
+		// A non-matching file and a category sidecar must be ignored.
+		tokio::fs::write(docs.join("getting-started").join("_category_.json"), "{}")
+			.await
+			.unwrap();
+
+		let template = docs.join("{namespace}.mdx");
+		let namespaces = discover_namespaces_recursive(&template).await.unwrap();
+
+		assert_eq!(
+			namespaces,
+			vec![
+				"getting-started/faq".to_string(),
+				"legal/terms-of-use".to_string(),
+				"welcome".to_string(),
+			]
+		);
+	}
+
+	#[tokio::test]
+	async fn discover_namespaces_recursive_skips_hidden_directories() {
+		let dir = TempDir::new().unwrap();
+		let docs = dir.path().join("docs");
+
+		tokio::fs::create_dir_all(docs.join(".drafts")).await.unwrap();
+		tokio::fs::write(docs.join("welcome.mdx"), "# Welcome").await.unwrap();
+		tokio::fs::write(docs.join(".drafts").join("secret.mdx"), "# Secret")
+			.await
+			.unwrap();
+
+		let template = docs.join("{namespace}.mdx");
+		let namespaces = discover_namespaces_recursive(&template).await.unwrap();
+
+		assert_eq!(namespaces, vec!["welcome".to_string()]);
+	}
+
+	#[tokio::test]
+	async fn discover_namespaces_recursive_errors_when_token_in_directory_component() {
+		let dir = TempDir::new().unwrap();
+		let template = dir.path().join("{namespace}").join("en.mdx");
+		let result = discover_namespaces_recursive(&template).await;
+
+		assert!(format!("{:#}", result.unwrap_err()).contains("file name"));
 	}
 
 	#[test]
