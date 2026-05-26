@@ -1,6 +1,6 @@
 # j18n
 
-LLM-powered CLI for syncing translated JSON locale files. Point it at a
+LLM-powered CLI for syncing translated locale files. Point it at a
 reference file (typically `en.json`), list your target languages, and it fills
 in the rest — incrementally, re-translating only entries whose source actually
 changed.
