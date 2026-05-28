@@ -10,7 +10,6 @@ use j18n_io::{
 };
 use j18n_translator::{create_extrapolated_values, restore_extrapolated_values, I18nTranslator};
 use j18n_validator::TranslationValidator;
-use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -340,17 +339,16 @@ where
 		ContentFormat::Json => {
 			debug!("Writing ({mode}) JSON to \"{}\"...", target.file.display());
 
-			let initial_json_dict: Map<String, Value> = match mode {
-				GenerationMode::Regenerate => reference_data.json_dict.clone(),
-				GenerationMode::Sync => merge_json_objects(&reference_data.json_dict, &target_data.json_dict),
-			};
 			let indent = resolve_indent(target, reference_i18n, mode).await?;
 
+			// Pass the target's existing dict for both modes: the writer keeps the
+			// user's key order and only places brand-new keys in sorted position.
+			// Regenerate overwrites every value but leaves ordering untouched.
 			write_i18n_tree_map(
 				target,
 				indent.as_bytes(),
 				&reference_data.json_dict,
-				initial_json_dict,
+				&target_data.json_dict,
 				&translated_batches,
 			)
 			.await?;
@@ -460,16 +458,6 @@ async fn resolve_indent(
 	Ok(DEFAULT_INDENT.to_string())
 }
 
-fn merge_json_objects(first: &Map<String, Value>, second: &Map<String, Value>) -> Map<String, Value> {
-	let mut merged = first.clone();
-
-	for (key, value) in second {
-		merged.insert(key.clone(), value.clone());
-	}
-
-	merged
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -477,6 +465,7 @@ mod tests {
 	use j18n_core::PathPattern;
 	use j18n_io::{content_hash_hex, I18nHashing, I18nHashingStore};
 	use regex::Regex;
+	use serde_json::{Map, Value};
 	use std::collections::HashMap;
 	use std::sync::Mutex;
 	use tempfile::TempDir;

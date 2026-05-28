@@ -2,26 +2,29 @@ use crate::compare::natural_key_cmp;
 use j18n_core::{I18nDefinition, J18nError, J18nResult};
 use serde::Serialize;
 use serde_json::{Map, Value};
+use std::cmp::Ordering;
 use tokio::fs;
 
 pub async fn write_i18n_tree_map(
 	definition: &I18nDefinition,
 	indent: &[u8],
 	reference_json_dict: &Map<String, Value>,
-	initial_json_dict: Map<String, Value>,
+	target_json_dict: &Map<String, Value>,
 	json_tree_map_list: &[Vec<(String, String)>],
 ) -> J18nResult<()> {
-	let mut translated_json_dict = initial_json_dict;
+	// The skeleton mirrors the reference's structure (so stale target keys drop
+	// out and every translatable key has a home) but keeps the target file's
+	// existing key order. User-made ordering is therefore preserved verbatim;
+	// only keys the target doesn't have yet are placed in natural-sorted order.
+	let mut translated_json_dict = build_ordered_dict(reference_json_dict, target_json_dict);
 
 	for batch in json_tree_map_list {
 		for (key, value) in batch {
-			translated_json_dict = change_i18n_property(translated_json_dict, key, value);
+			change_i18n_property(&mut translated_json_dict, key, value);
 		}
 	}
 
-	let cleaned_json_dict = remove_keys_absent_from_reference_dict(reference_json_dict, &translated_json_dict);
-	let sorted_json_dict = sort_object_recursively(cleaned_json_dict);
-	let mut serialized = serialize_pretty(&sorted_json_dict, indent).map_err(|source| J18nError::Json {
+	let mut serialized = serialize_pretty(&translated_json_dict, indent).map_err(|source| J18nError::Json {
 		path: definition.file.clone(),
 		source,
 	})?;
@@ -79,54 +82,36 @@ pub async fn write_markdown_file(definition: &I18nDefinition, body: &str) -> J18
 		})
 }
 
-fn change_i18n_property(mut json: Map<String, Value>, key_dot_separated: &str, value: &str) -> Map<String, Value> {
+/// Writes a translated value into the skeleton produced by [`build_ordered_dict`],
+/// which already contains every reference key. Existing entries are overwritten
+/// **in place**, so a key never moves: editing a value never reorders the file.
+fn change_i18n_property(json: &mut Map<String, Value>, key_dot_separated: &str, value: &str) {
 	// 1. Leaf: an existing key whose value is not an object is overwritten
-	//    directly. Reached both for genuinely flat string entries and for the
-	//    final segment of a descent (e.g. "message" inside a Docusaurus entry).
+	//    directly. `Map::insert` updates an existing key without moving it.
+	//    Reached both for genuinely flat string entries and for the final
+	//    segment of a descent (e.g. "message" inside a Docusaurus entry).
 	if json
 		.get(key_dot_separated)
 		.is_some_and(|existing| !existing.is_object())
 	{
 		json.insert(key_dot_separated.to_string(), Value::String(value.to_string()));
 
-		return json;
+		return;
 	}
 
 	// 2. Route into the LONGEST existing object-valued key that is a dot-boundary
-	//    prefix of the path. This preserves keys that contain literal dots — e.g.
-	//    Docusaurus / i18next "flat" keys like "theme.docs.paginator.next" or
-	//    "link.title.More" — instead of re-nesting them into separate objects.
-	if let Some(prefix) = longest_object_prefix(&json, key_dot_separated) {
-		let remainder = key_dot_separated[prefix.len()..].trim_start_matches('.');
-		let sub_json = match json.remove(&prefix) {
-			Some(Value::Object(existing)) => existing,
-			_ => Map::new(),
-		};
-		let changed_sub_json = change_i18n_property(sub_json, remainder, value);
+	//    prefix of the path, descending in place. This preserves keys that
+	//    contain literal dots — e.g. Docusaurus / i18next "flat" keys like
+	//    "theme.docs.paginator.next" or "link.title.More" — instead of re-nesting
+	//    them into separate objects, and it routes through genuine object levels
+	//    (e.g. "section.a") without disturbing sibling order.
+	if let Some(prefix) = longest_object_prefix(json, key_dot_separated) {
+		let remainder = key_dot_separated[prefix.len()..].trim_start_matches('.').to_string();
 
-		json.insert(prefix, Value::Object(changed_sub_json));
-
-		return json;
+		if let Some(Value::Object(sub_json)) = json.get_mut(&prefix) {
+			change_i18n_property(sub_json, &remainder, value);
+		}
 	}
-
-	// 3. No existing structure matched: split on the first dot and create nested
-	//    objects. Used when a key is absent from the target (fresh translation of
-	//    a nested-style dictionary).
-	if let Some((this_part, rest_parts)) = key_dot_separated.split_once('.') {
-		let sub_json = match json.remove(this_part) {
-			Some(Value::Object(existing)) => existing,
-			_ => Map::new(),
-		};
-		let changed_sub_json = change_i18n_property(sub_json, rest_parts, value);
-
-		json.insert(this_part.to_string(), Value::Object(changed_sub_json));
-
-		return json;
-	}
-
-	json.insert(key_dot_separated.to_string(), Value::String(value.to_string()));
-
-	json
 }
 
 /// Returns the longest key in `json` whose value is an object and that is a
@@ -158,52 +143,86 @@ fn longest_object_prefix(json: &Map<String, Value>, path: &str) -> Option<String
 	best.cloned()
 }
 
-fn remove_keys_absent_from_reference_dict(
-	reference_dict: &Map<String, Value>,
-	target_dict: &Map<String, Value>,
-) -> Map<String, Value> {
-	let mut result = Map::new();
+/// Builds the output skeleton from the reference's structure while honouring the
+/// target file's existing key order:
+///
+/// - Reference keys the target already has appear in the **target's** order, with
+///   their current value kept (so untouched translations are preserved verbatim).
+/// - Reference keys the target lacks are inserted at their **natural-sorted**
+///   position, so brand-new entries land sorted without disturbing existing ones.
+/// - Target keys absent from the reference are dropped (stale-key pruning).
+///
+/// Nested objects recurse, so the same rules apply at every level. A subtree that
+/// is entirely new (no counterpart in the target) is emitted fully natural-sorted.
+fn build_ordered_dict(reference: &Map<String, Value>, target: &Map<String, Value>) -> Map<String, Value> {
+	let mut ordered: Vec<(String, Value)> = Vec::with_capacity(reference.len());
 
-	for (key, target_value) in target_dict {
-		let Some(reference_value) = reference_dict.get(key) else {
+	// 1. Keep every reference key the target already has, in the target's order.
+	for (key, target_value) in target {
+		let Some(reference_value) = reference.get(key) else {
 			continue;
 		};
 
-		match (reference_value, target_value) {
-			(Value::Object(reference_sub), Value::Object(target_sub)) => {
-				result.insert(
-					key.clone(),
-					Value::Object(remove_keys_absent_from_reference_dict(reference_sub, target_sub)),
-				);
+		let value = match reference_value {
+			Value::Object(reference_sub) => {
+				let empty = Map::new();
+				let target_sub = match target_value {
+					Value::Object(sub) => sub,
+					_ => &empty,
+				};
+
+				Value::Object(build_ordered_dict(reference_sub, target_sub))
 			}
-			_ => {
-				result.insert(key.clone(), target_value.clone());
-			}
+			// Reference says leaf: keep the target's existing value, unless the
+			// target diverged structurally (object where a leaf is expected), in
+			// which case fall back to the reference value.
+			_ => match target_value {
+				Value::Object(_) => reference_value.clone(),
+				_ => target_value.clone(),
+			},
+		};
+
+		ordered.push((key.clone(), value));
+	}
+
+	// 2. Insert reference keys the target lacks at their natural-sorted position.
+	for (key, reference_value) in reference {
+		if target.contains_key(key) {
+			continue;
+		}
+
+		let value = sort_new_value(reference_value);
+		let position = ordered
+			.iter()
+			.position(|(existing, _)| natural_key_cmp(existing, key) == Ordering::Greater);
+
+		match position {
+			Some(index) => ordered.insert(index, (key.clone(), value)),
+			None => ordered.push((key.clone(), value)),
 		}
 	}
 
-	result
+	ordered.into_iter().collect()
 }
 
-fn sort_object_recursively(map: Map<String, Value>) -> Map<String, Value> {
-	let mut entries: Vec<(String, Value)> = map.into_iter().collect();
-
-	entries.sort_by(|(a, _), (b, _)| natural_key_cmp(a, b));
-
-	let mut result = Map::new();
-
-	for (key, value) in entries {
-		result.insert(key, sort_value_recursively(value));
-	}
-
-	result
-}
-
-fn sort_value_recursively(value: Value) -> Value {
+/// Recursively natural-sorts the keys of a brand-new value (one with no existing
+/// counterpart in the target), so freshly added subtrees are emitted sorted.
+fn sort_new_value(value: &Value) -> Value {
 	match value {
-		Value::Object(map) => Value::Object(sort_object_recursively(map)),
-		Value::Array(items) => Value::Array(items.into_iter().map(sort_value_recursively).collect()),
-		other => other,
+		Value::Object(map) => {
+			let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+
+			entries.sort_by(|(a, _), (b, _)| natural_key_cmp(a, b));
+
+			Value::Object(
+				entries
+					.into_iter()
+					.map(|(key, value)| (key.clone(), sort_new_value(value)))
+					.collect(),
+			)
+		}
+		Value::Array(items) => Value::Array(items.iter().map(sort_new_value).collect()),
+		other => other.clone(),
 	}
 }
 
@@ -246,7 +265,7 @@ mod tests {
 		let initial = reference.clone();
 		let translations = vec![vec![("a".to_string(), "y".to_string())]];
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &translations)
 			.await
 			.unwrap();
 
@@ -262,7 +281,7 @@ mod tests {
 		let reference = parse(r#"{"a": "x"}"#);
 		let initial = reference.clone();
 
-		write_i18n_tree_map(&definition, b"  ", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"  ", &reference, &initial, &[])
 			.await
 			.unwrap();
 
@@ -282,7 +301,7 @@ mod tests {
 			("section.b".to_string(), "BB".to_string()),
 		]];
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &translations)
 			.await
 			.unwrap();
 
@@ -300,7 +319,7 @@ mod tests {
 		let reference = parse(r#"{"keep": "K"}"#);
 		let initial = parse(r#"{"keep": "K", "stale": "S"}"#);
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &[])
 			.await
 			.unwrap();
 
@@ -318,7 +337,7 @@ mod tests {
 		let reference = parse(r#"{"section": {"keep": "K"}}"#);
 		let initial = parse(r#"{"section": {"keep": "K", "stale": "S"}}"#);
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &[])
 			.await
 			.unwrap();
 
@@ -329,14 +348,16 @@ mod tests {
 		assert!(!parsed["section"].as_object().unwrap().contains_key("stale"));
 	}
 
+	// When the target has no prior entries (fresh file), every key is "new" and so
+	// the whole output comes out in natural-sorted order.
 	#[tokio::test]
-	async fn sorts_top_level_keys_alphabetically() {
+	async fn new_top_level_keys_are_inserted_in_natural_order() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "pt");
 		let reference = parse(r#"{"zebra": "Z", "apple": "A", "mango": "M"}"#);
-		let initial = reference.clone();
+		let target = Map::new();
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"\t", &reference, &target, &[])
 			.await
 			.unwrap();
 
@@ -350,13 +371,13 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn sorts_numeric_keys_in_natural_order() {
+	async fn new_numeric_keys_are_inserted_in_natural_order() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "pt");
 		let reference = parse(r#"{"0":"a","1":"b","10":"c","11":"d","2":"e"}"#);
-		let initial = reference.clone();
+		let target = Map::new();
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"\t", &reference, &target, &[])
 			.await
 			.unwrap();
 
@@ -372,13 +393,13 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn sorts_camel_case_keys_with_uppercase_before_lowercase() {
+	async fn new_camel_case_keys_are_inserted_with_uppercase_before_lowercase() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "pt");
 		let reference = parse(r#"{"types": "T", "typeSelection": "S"}"#);
-		let initial = reference.clone();
+		let target = Map::new();
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"\t", &reference, &target, &[])
 			.await
 			.unwrap();
 
@@ -390,13 +411,13 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn sorts_nested_keys_recursively() {
+	async fn new_nested_subtrees_are_emitted_sorted() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "pt");
 		let reference = parse(r#"{"section": {"zebra": "Z", "apple": "A"}}"#);
-		let initial = reference.clone();
+		let target = Map::new();
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"\t", &reference, &target, &[])
 			.await
 			.unwrap();
 
@@ -405,6 +426,84 @@ mod tests {
 		let zebra_pos = written.find("\"zebra\"").unwrap();
 
 		assert!(apple_pos < zebra_pos);
+	}
+
+	// The core guarantee: an existing target file's key order is never rearranged,
+	// even when it is not in natural order.
+	#[tokio::test]
+	async fn preserves_existing_target_key_order_without_resorting() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"apple": "A", "mango": "M", "zebra": "Z"}"#);
+		let target = parse(r#"{"zebra": "ZZ", "apple": "AA", "mango": "MM"}"#);
+
+		write_i18n_tree_map(&definition, b"\t", &reference, &target, &[])
+			.await
+			.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+		let zebra_pos = written.find("\"zebra\"").unwrap();
+		let apple_pos = written.find("\"apple\"").unwrap();
+		let mango_pos = written.find("\"mango\"").unwrap();
+
+		assert!(zebra_pos < apple_pos, "existing order zebra→apple must be kept");
+		assert!(apple_pos < mango_pos, "existing order apple→mango must be kept");
+	}
+
+	// A brand-new key lands in its natural-sorted position relative to the
+	// existing (sorted) siblings, and the existing entries keep their values.
+	#[tokio::test]
+	async fn new_key_is_inserted_at_sorted_position_among_existing_keys() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"apple": "A", "mango": "M", "zebra": "Z"}"#);
+		let target = parse(r#"{"apple": "AA", "zebra": "ZZ"}"#);
+		let translations = vec![vec![("mango".to_string(), "MM".to_string())]];
+
+		write_i18n_tree_map(&definition, b"\t", &reference, &target, &translations)
+			.await
+			.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+		let parsed: Map<String, Value> = serde_json::from_str(&written).unwrap();
+
+		assert_eq!(parsed["apple"], "AA");
+		assert_eq!(parsed["zebra"], "ZZ");
+		assert_eq!(parsed["mango"], "MM");
+
+		let apple_pos = written.find("\"apple\"").unwrap();
+		let mango_pos = written.find("\"mango\"").unwrap();
+		let zebra_pos = written.find("\"zebra\"").unwrap();
+
+		assert!(
+			apple_pos < mango_pos && mango_pos < zebra_pos,
+			"mango must be inserted between apple and zebra"
+		);
+	}
+
+	// Editing an existing value must overwrite it in place, never move the key.
+	#[tokio::test]
+	async fn editing_a_value_keeps_the_key_in_place() {
+		let dir = TempDir::new().unwrap();
+		let definition = definition_in(&dir, "pt");
+		let reference = parse(r#"{"a": "A", "b": "B"}"#);
+		let target = parse(r#"{"b": "OLD_B", "a": "OLD_A"}"#);
+		let translations = vec![vec![("b".to_string(), "NEW_B".to_string())]];
+
+		write_i18n_tree_map(&definition, b"\t", &reference, &target, &translations)
+			.await
+			.unwrap();
+
+		let written = fs::read_to_string(&definition.file).await.unwrap();
+		let parsed: Map<String, Value> = serde_json::from_str(&written).unwrap();
+
+		assert_eq!(parsed["b"], "NEW_B");
+		assert_eq!(parsed["a"], "OLD_A");
+
+		let b_pos = written.find("\"b\"").unwrap();
+		let a_pos = written.find("\"a\"").unwrap();
+
+		assert!(b_pos < a_pos, "existing b→a order must be preserved after editing b");
 	}
 
 	#[tokio::test]
@@ -419,7 +518,7 @@ mod tests {
 		let reference = parse(r#"{"a": "x"}"#);
 		let initial = reference.clone();
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &[])
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &[])
 			.await
 			.unwrap();
 
@@ -513,7 +612,7 @@ mod tests {
 			"Próximo".to_string(),
 		)]];
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &translations)
 			.await
 			.unwrap();
 
@@ -538,7 +637,7 @@ mod tests {
 			"Ir para o Skiley".to_string(),
 		)]];
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &translations)
 			.await
 			.unwrap();
 
@@ -560,7 +659,7 @@ mod tests {
 			("link.title.More.message".to_string(), "Mais".to_string()),
 		]];
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &translations)
 			.await
 			.unwrap();
 
@@ -583,7 +682,7 @@ mod tests {
 			("section.nested.b".to_string(), "BB".to_string()),
 		]];
 
-		write_i18n_tree_map(&definition, b"\t", &reference, initial, &translations)
+		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &translations)
 			.await
 			.unwrap();
 

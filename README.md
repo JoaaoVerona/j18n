@@ -51,10 +51,12 @@ rules, file layout, and what gets re-translated when.
 - **Domain prompting** — append your own glossary rules
   (`"don't translate 'playlist'"`, `"context is a music app"`) without
   forking.
-- **Polished output** — auto-detects existing indentation (tab / 2-space /
-  4-space) per file, sorts keys in natural order (numbers as numbers,
-  case-insensitive with sensible camelCase tiebreaker), preserves your
-  reference file untouched.
+- **Order-preserving output** — auto-detects existing indentation (tab /
+  2-space / 4-space) per file and keeps each target file's existing key order
+  intact. Existing keys are never reordered, so any hand-made ordering survives;
+  only keys a target doesn't have yet are inserted in natural order (numbers as
+  numbers, case-insensitive with a sensible camelCase tiebreaker). Your
+  reference file is left untouched.
 - **Cross-platform stable cache** — cache identifiers come from your config
   strings, not resolved file paths. A cache generated on Windows works on
   Linux/macOS, and vice versa.
@@ -340,8 +342,9 @@ backends — works the same regardless of format.
 
 The original behavior: a reference JSON object is flattened into dotted-key
 entries (`section.button.ok`), each string value translated independently, and
-the target is rebuilt as sorted, pretty-printed JSON. Non-string values are
-left untouched.
+the target is written as pretty-printed JSON that keeps the target file's
+existing key order — only keys it doesn't have yet are inserted, each in
+natural order. Non-string values are left untouched.
 
 ### `markdown`
 
@@ -493,7 +496,11 @@ cache as if everything had been done from scratch.
 
 - **Indentation** auto-detects from the existing target file (when syncing) or
   the reference file. Falls back to a single tab.
-- **Key order** is natural:
+- **Key order is preserved.** A target file's existing keys are never
+  reordered, so hand-made ordering survives `sync` and `regenerate` — values are
+  edited in place. Only keys that are new to a target are inserted, each at its
+  natural-order position (so a wholly new file comes out fully natural-sorted).
+  Natural order:
   - numbers compare as numbers (`"1"`, `"2"`, ..., `"10"`, `"11"`),
   - case-insensitive primary sort (`none` before `noSuggestions`),
   - uppercase wins as tiebreaker when one string is a case-fold prefix of the
