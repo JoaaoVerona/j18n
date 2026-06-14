@@ -173,16 +173,36 @@ async fn execute_claude_code(model: &str, prompt: &str) -> J18nResult<String> {
 	let mut command = if cfg!(target_os = "windows") {
 		let mut command = Command::new("cmd");
 
-		command.args(["/C", "claude", &model_arg, "-p"]);
+		command.args([
+			"/C",
+			"claude",
+			&model_arg,
+			"-p",
+			"--tools",
+			"",
+			"--disallowed-tools",
+			"*",
+			"--strict-mcp-config",
+		]);
 		command
 	} else {
 		let mut command = Command::new("claude");
 
-		command.args([&model_arg, "-p"]);
+		command.args([
+			&model_arg,
+			"-p",
+			"--tools",
+			"",
+			"--disallowed-tools",
+			"*",
+			"--strict-mcp-config",
+		]);
 		command
 	};
 
 	command
+		.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
+		.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
 		.stdin(Stdio::piped())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
