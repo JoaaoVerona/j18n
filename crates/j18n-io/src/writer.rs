@@ -630,11 +630,11 @@ mod tests {
 	async fn translates_flat_dotted_key_with_spaces_and_many_dots() {
 		let dir = TempDir::new().unwrap();
 		let definition = definition_in(&dir, "pt");
-		let reference = parse(r#"{"link.item.label.Go to Skiley": {"message": "Go to Skiley"}}"#);
+		let reference = parse(r#"{"link.item.label.Go to Site": {"message": "Go to Site"}}"#);
 		let initial = reference.clone();
 		let translations = vec![vec![(
-			"link.item.label.Go to Skiley.message".to_string(),
-			"Ir para o Skiley".to_string(),
+			"link.item.label.Go to Site.message".to_string(),
+			"Ir para o Site".to_string(),
 		)]];
 
 		write_i18n_tree_map(&definition, b"\t", &reference, &initial, &translations)
@@ -644,7 +644,7 @@ mod tests {
 		let parsed: Map<String, Value> =
 			serde_json::from_str(&fs::read_to_string(&definition.file).await.unwrap()).unwrap();
 
-		assert_eq!(parsed["link.item.label.Go to Skiley"]["message"], "Ir para o Skiley");
+		assert_eq!(parsed["link.item.label.Go to Site"]["message"], "Ir para o Site");
 		assert!(!parsed.contains_key("link"));
 	}
 

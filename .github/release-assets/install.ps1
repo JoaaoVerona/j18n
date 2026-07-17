@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 # it so the download doesn't appear to hang.
 $ProgressPreference = 'SilentlyContinue'
 
-$repo = 'Skiley/j18n'
+$repo = 'JoaaoVerona/j18n'
 $installDir = if ($env:J18N_INSTALL_DIR) { $env:J18N_INSTALL_DIR } else { "$env:LOCALAPPDATA\j18n\bin" }
 # Version precedence: positional arg, then $env:J18N_VERSION (the
 # `iwr ... | iex` invocation form can't pass positional args), then latest.

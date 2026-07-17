@@ -9,9 +9,9 @@
 	"files": [
 		"bin"
 	],
-	"homepage": "https://github.com/Skiley/j18n",
+	"homepage": "https://github.com/JoaaoVerona/j18n",
 	"license": "MIT",
 	"name": "@j18n/cli",
-	"repository": "https://github.com/Skiley/j18n",
+	"repository": "https://github.com/JoaaoVerona/j18n",
 	"version": "0.0.0"
 }

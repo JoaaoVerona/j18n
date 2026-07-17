@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="Skiley/j18n"
+REPO="JoaaoVerona/j18n"
 INSTALL_DIR="${J18N_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${1:-latest}"
 

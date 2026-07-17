@@ -1,6 +1,6 @@
 name: Setup j18n
 description: Installs the j18n CLI and adds it to PATH
-author: Skiley
+author: JoaaoVerona
 
 inputs:
   version:
@@ -51,9 +51,9 @@ runs:
         archive="j18n-cli-${TARGET}.${EXT}"
 
         if [ "$VERSION" = "latest" ]; then
-          url="https://github.com/Skiley/j18n/releases/latest/download/${archive}"
+          url="https://github.com/JoaaoVerona/j18n/releases/latest/download/${archive}"
         else
-          url="https://github.com/Skiley/j18n/releases/download/${VERSION}/${archive}"
+          url="https://github.com/JoaaoVerona/j18n/releases/download/${VERSION}/${archive}"
         fi
 
         install_dir="$RUNNER_TEMP/j18n-bin"

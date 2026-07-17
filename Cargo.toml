@@ -20,8 +20,8 @@ rust-version = "1.94.1"
 edition = "2021"
 license = "MIT"
 publish = false
-repository = "https://github.com/Skiley/j18n"
-homepage = "https://github.com/Skiley/j18n"
+repository = "https://github.com/JoaaoVerona/j18n"
+homepage = "https://github.com/JoaaoVerona/j18n"
 
 [workspace.dependencies]
 anyhow = "1.0"

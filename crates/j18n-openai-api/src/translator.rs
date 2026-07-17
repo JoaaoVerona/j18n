@@ -45,7 +45,7 @@ impl DefaultOpenAiTransport {
 	/// headers OpenRouter uses to identify the calling app on its leaderboards.
 	pub fn openrouter(api_key: String, timeout: Duration) -> J18nResult<Self> {
 		let extra_headers = vec![
-			("HTTP-Referer", "https://github.com/Skiley/j18n".to_string()),
+			("HTTP-Referer", "https://github.com/JoaaoVerona/j18n".to_string()),
 			("X-Title", "j18n".to_string()),
 		];
 

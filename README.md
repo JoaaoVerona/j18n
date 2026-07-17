@@ -72,13 +72,13 @@ npm install -g @j18n/cli
 Linux / macOS:
 
 ```bash
-curl -fsSL https://github.com/Skiley/j18n/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/JoaaoVerona/j18n/releases/latest/download/install.sh | sh
 ```
 
 Windows (via PowerShell):
 
 ```powershell
-iwr https://github.com/Skiley/j18n/releases/latest/download/install.ps1 | iex
+iwr https://github.com/JoaaoVerona/j18n/releases/latest/download/install.ps1 | iex
 ```
 
 Or build from source (see [Building from source](#building-from-source)).
@@ -173,7 +173,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Skiley/j18n/.github/actions/setup@master
+      - uses: JoaaoVerona/j18n/.github/actions/setup@master
       - run: j18n check
 ```
 
@@ -182,7 +182,7 @@ The action downloads the release binary matching the runner's OS/arch
 specific release if you don't want `latest`:
 
 ```yaml
-      - uses: Skiley/j18n/.github/actions/setup@master
+      - uses: JoaaoVerona/j18n/.github/actions/setup@master
         with:
           version: v0.2.0
 ```
