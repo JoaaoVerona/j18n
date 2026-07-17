@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@v1.16.1
-      - uses: Skiley/runfile/.github/actions/setup@master
+      - uses: JoaaoVerona/runfile/.github/actions/setup@master
         with:
           global-files: Runfile-ci.json
       - run: run ci:lint
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@v1.16.1
-      - uses: Skiley/runfile/.github/actions/setup@master
+      - uses: JoaaoVerona/runfile/.github/actions/setup@master
         with:
           global-files: Runfile-ci.json
       - run: run ci:test
