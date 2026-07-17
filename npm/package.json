@@ -1,0 +1,17 @@
+{
+	"bin": {
+		"j18n": "bin/j18n.js"
+	},
+	"description": "j18n CLI — LLM-powered syncing of translated locale files",
+	"engines": {
+		"node": ">=16"
+	},
+	"files": [
+		"bin"
+	],
+	"homepage": "https://github.com/Skiley/j18n",
+	"license": "MIT",
+	"name": "@j18n/cli",
+	"repository": "https://github.com/Skiley/j18n",
+	"version": "0.0.0"
+}
