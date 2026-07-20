@@ -50,6 +50,7 @@ j18n-translator = { path = "crates/j18n-translator" }
 j18n-validator = { path = "crates/j18n-validator" }
 
 [profile.dev.package."*"]
+debug = 0
 opt-level = 3
 
 [profile.release]
