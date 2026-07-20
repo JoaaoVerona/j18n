@@ -72,7 +72,6 @@
 		"lint": {
 			"description": "Completely lints (type-checks, formats, runs Clippy) the project",
 			"commands": [
-				"cargo check",
 				"cargo fmt --all",
 				"cargo clippy --all-targets --all-features -- -D warnings",
 				{
