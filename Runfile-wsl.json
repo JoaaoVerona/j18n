@@ -15,6 +15,13 @@
 			"description": "Build all crates in release mode using WSL",
 			"commands": "wsl --shell-type login -- cargo build --release {{ ARGS }} --target-dir target-linux"
 		},
+		"check": {
+			"description": "Non-mutating gate (fmt --check + Clippy) using WSL",
+			"commands": [
+				"wsl --shell-type login -- cargo fmt --all -- --check",
+				"wsl --shell-type login -- cargo clippy --all-targets --all-features -- -D warnings"
+			]
+		},
 		"lint": {
 			"description": "Completely lints (type-checks, formats, runs Clippy) the project using WSL",
 			"commands": [

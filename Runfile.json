@@ -4,7 +4,8 @@
 		"env": {
 			"CARGO_TARGET_DIR": "target-{{ RUN.os }}"
 		},
-		"logging": true
+		"logging": true,
+		"prepare": "@setup"
 	},
 	"includes": [
 		{
@@ -31,6 +32,17 @@
 				{
 					"if": "{{ RUN.os == 'windows' }}",
 					"then": "@wsl:build:release"
+				}
+			]
+		},
+		"check": {
+			"description": "Non-mutating gate: format check + Clippy (deny warnings; also type/borrow-checks)",
+			"commands": [
+				"cargo fmt --all -- --check",
+				"cargo clippy --all-targets --all-features -- -D warnings",
+				{
+					"if": "{{ RUN.os == 'windows' }}",
+					"then": "@wsl:check"
 				}
 			]
 		},
@@ -80,6 +92,19 @@
 				}
 			]
 		},
+		"precommit": {
+			"description": "Format staged Rust files with rustfmt and re-stage them (pre-commit hook body)",
+			"commands": [
+				"{{ define(rs, capture('git diff --cached --name-only --diff-filter=ACMR -- \"*.rs\" | xargs')) }}",
+				{
+					"if": "{{ VAR.rs != '' }}",
+					"then": [
+						"rustfmt {{ VAR.rs }}",
+						"git add {{ VAR.rs }}"
+					]
+				}
+			]
+		},
 		"release": {
 			"description": "Bumps the workspace version (major/minor/patch) in Cargo.toml, refreshes Cargo.lock, tags the commit, then pushes everything so CI runs the release",
 			"commands": [
@@ -106,6 +131,10 @@
 				"git push --tags"
 			],
 			"forceShell": "sh"
+		},
+		"setup": {
+			"description": "One-time per clone: activate the committed git hooks",
+			"commands": "git config core.hooksPath .githooks"
 		},
 		"test": {
 			"description": "Run all workspace tests",
